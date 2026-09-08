@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vision • Dual-Camera Live Center</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="top-header">
+      <div class="brand">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+            <circle cx="12" cy="13" r="4"></circle>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>VISION CORE</h1>
+          <span class="subtitle">Concurrent Dual-Camera Live Hub</span>
+        </div>
+      </div>
+
+      <!-- Network and Status Pills -->
+      <div class="header-status">
+        <div class="status-pill" id="serverPill">
+          <span class="status-dot green"></span>
+          <span class="label">Server:</span>
+          <span class="value" id="serverIpDisplay">Detecting...</span>
+        </div>
+        <div class="status-pill" id="phonePill">
+          <span class="status-dot red" id="phoneDot"></span>
+          <span class="label">Phone:</span>
+          <span class="value" id="phoneStatusDisplay">Waiting for Wi-Fi Link...</span>
+        </div>
+        <div class="status-pill">
+          <span class="label">Auto-Discovery:</span>
+          <span class="value active-badge">UDP: 45454 Active</span>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div class="view-controls">
+        <button class="btn-mode active" data-mode="split" title="Side-by-Side Dual View">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18"/></svg>
+          Dual Split
+        </button>
+        <button class="btn-mode" data-mode="pip" title="Picture in Picture">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="13" y="13" width="6" height="6" rx="1"/></svg>
+          PiP
+        </button>
+        <button class="btn-mode" data-mode="rear-only" title="Rear Camera Fullscreen">Rear Only</button>
+        <button class="btn-mode" data-mode="front-only" title="Front Camera Fullscreen">Front Only</button>
+      </div>
+    </header>
+
+    <!-- Main Live Streams Grid -->
+    <main class="streams-viewport mode-split" id="viewport">
+      <!-- Rear Camera Box -->
+      <div class="camera-card" id="rearCard">
+        <div class="camera-header">
+          <div class="cam-title">
+            <span class="tag tag-rear">BACK CAM</span>
+            <span class="cam-res" id="rearResolution">-- x --</span>
+          </div>
+          <div class="cam-telemetry">
+            <span class="stat-badge"><span id="rearFps">0.0</span> FPS</span>
+            <span class="stat-badge"><span id="rearBitrate">0</span> kbps</span>
+          </div>
+        </div>
+
+        <div class="canvas-container">
+          <canvas id="rearCanvas"></canvas>
+          <div class="no-stream-overlay" id="rearOverlay">
+            <div class="loader-pulse"></div>
+            <p>Waiting for Rear Camera Stream</p>
+            <span class="hint">Ensure phone app is running on same Wi-Fi</span>
+          </div>
+        </div>
+
+        <div class="camera-footer">
+          <button class="btn-action" onclick="takeSnapshot('rear')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+            Snapshot
+          </button>
+          <button class="btn-action" onclick="toggleFullscreen('rearCard')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+            Expand
+          </button>
+        </div>
+      </div>
+
+      <!-- Front Camera Box -->
+      <div class="camera-card" id="frontCard">
+        <div class="camera-header">
+          <div class="cam-title">
+            <span class="tag tag-front">FRONT CAM</span>
+            <span class="cam-res" id="frontResolution">-- x --</span>
+          </div>
+          <div class="cam-telemetry">
+            <span class="stat-badge"><span id="frontFps">0.0</span> FPS</span>
+            <span class="stat-badge"><span id="frontBitrate">0</span> kbps</span>
+          </div>
+        </div>
+
+        <div class="canvas-container">
+          <canvas id="frontCanvas"></canvas>
+          <div class="no-stream-overlay" id="frontOverlay">
+            <div class="loader-pulse"></div>
+            <p>Waiting for Front Camera Stream</p>
+            <span class="hint">Broadcasting concurrently with rear camera</span>
+          </div>
+        </div>
+
+        <div class="camera-footer">
+          <button class="btn-action" onclick="takeSnapshot('front')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+            Snapshot
+          </button>
+          <button class="btn-action" onclick="toggleFullscreen('frontCard')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+            Expand
+          </button>
+        </div>
+      </div>
+    </main>
+
+    <!-- Footer System Status -->
+    <footer class="bottom-bar">
+      <div class="system-item">
+        <span class="label">Client Device:</span>
+        <span class="val" id="deviceModelText">Not Connected</span>
+      </div>
+      <div class="system-item">
+        <span class="label">Total Received:</span>
+        <span class="val" id="totalFramesText">0 frames</span>
+      </div>
+      <div class="system-item">
+        <span class="label">Connection State:</span>
+        <span class="val highlight" id="wsStateText">Connecting to local core...</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
