@@ -9,13 +9,12 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
-import android.util.Size
 import java.nio.ByteBuffer
 
 /**
- * Manages concurrent capture of both Rear (Back) and Front cameras using Android Camera2 API.
- * Employs concurrent camera configurations introduced in Android 11 (API 30+) when available,
- * with graceful fallback logic for single-ISP devices.
+ * Manages resilient capture of Rear (Back) and Front cameras using Android Camera2 API.
+ * Designed with fault-tolerance: if one camera (e.g. front camera) is broken, disconnected,
+ * or unavailable, the application gracefully continues streaming the working camera without crashing.
  */
 class DualCameraManager(private val context: Context) {
 
@@ -29,10 +28,16 @@ class DualCameraManager(private val context: Context) {
         fun onFrameAvailable(cameraCode: Byte, jpegBytes: ByteArray)
     }
 
+    interface StateListener {
+        fun onCameraStateChanged(cameraCode: Byte, isAvailable: Boolean, message: String)
+    }
+
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
-    private var rearCameraId: String? = null
-    private var frontCameraId: String? = null
+    var rearCameraId: String? = null
+        private set
+    var frontCameraId: String? = null
+        private set
 
     private var rearCameraDevice: CameraDevice? = null
     private var frontCameraDevice: CameraDevice? = null
@@ -47,6 +52,7 @@ class DualCameraManager(private val context: Context) {
     private var backgroundHandler: Handler? = null
 
     private var frameListener: FrameListener? = null
+    private var stateListener: StateListener? = null
     private var isRunning = false
 
     init {
@@ -56,17 +62,21 @@ class DualCameraManager(private val context: Context) {
     private fun detectCameraIds() {
         try {
             for (id in cameraManager.cameraIdList) {
-                val characteristics = cameraManager.getCameraCharacteristics(id)
-                val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
-                if (facing == CameraCharacteristics.LENS_FACING_BACK && rearCameraId == null) {
-                    rearCameraId = id
-                } else if (facing == CameraCharacteristics.LENS_FACING_FRONT && frontCameraId == null) {
-                    frontCameraId = id
+                try {
+                    val characteristics = cameraManager.getCameraCharacteristics(id)
+                    val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                    if (facing == CameraCharacteristics.LENS_FACING_BACK && rearCameraId == null) {
+                        rearCameraId = id
+                    } else if (facing == CameraCharacteristics.LENS_FACING_FRONT && frontCameraId == null) {
+                        frontCameraId = id
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Unable to inspect camera ID $id: ${e.message}")
                 }
             }
-            Log.d(TAG, "Identified cameras - Rear: $rearCameraId, Front: $frontCameraId")
+            Log.d(TAG, "Detected camera IDs -> Rear: $rearCameraId, Front: $frontCameraId")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to detect camera IDs", e)
+            Log.e(TAG, "Failed to query camera list", e)
         }
     }
 
@@ -82,7 +92,7 @@ class DualCameraManager(private val context: Context) {
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Error querying concurrent camera IDs", e)
+                Log.w(TAG, "Querying concurrentCameraIds warning: ${e.message}")
             }
         }
         return false
@@ -91,26 +101,44 @@ class DualCameraManager(private val context: Context) {
     @SuppressLint("MissingPermission")
     @Synchronized
     fun startStreaming(
+        cameraMode: String = "both", // "both", "rear", "front"
         targetWidth: Int = 640,
         targetHeight: Int = 480,
-        listener: FrameListener
+        listener: FrameListener,
+        statusListener: StateListener? = null
     ) {
         if (isRunning) return
         isRunning = true
         frameListener = listener
+        stateListener = statusListener
 
         startBackgroundThread()
-
         val handler = backgroundHandler ?: return
 
-        // Open Rear Camera
-        rearCameraId?.let { id ->
-            setupRearCamera(id, targetWidth, targetHeight, handler)
+        val shouldOpenRear = (cameraMode == "both" || cameraMode == "rear")
+        val shouldOpenFront = (cameraMode == "both" || cameraMode == "front")
+
+        // 1. Setup Rear Camera with isolated error handling
+        if (shouldOpenRear) {
+            if (rearCameraId != null) {
+                setupRearCamera(rearCameraId!!, targetWidth, targetHeight, handler)
+            } else {
+                stateListener?.onCameraStateChanged(CAMERA_REAR, false, "Rear camera hardware ID not found")
+            }
+        } else {
+            stateListener?.onCameraStateChanged(CAMERA_REAR, false, "Disabled by user selection")
         }
 
-        // Open Front Camera (Concurrently)
-        frontCameraId?.let { id ->
-            setupFrontCamera(id, targetWidth, targetHeight, handler)
+        // 2. Setup Front Camera with isolated error handling
+        if (shouldOpenFront) {
+            if (frontCameraId != null) {
+                setupFrontCamera(frontCameraId!!, targetWidth, targetHeight, handler)
+            } else {
+                Log.w(TAG, "Front camera hardware ID not available.")
+                stateListener?.onCameraStateChanged(CAMERA_FRONT, false, "Front camera hardware unavailable")
+            }
+        } else {
+            stateListener?.onCameraStateChanged(CAMERA_FRONT, false, "Disabled by user selection")
         }
     }
 
@@ -127,21 +155,26 @@ class DualCameraManager(private val context: Context) {
                 override fun onOpened(camera: CameraDevice) {
                     rearCameraDevice = camera
                     createSession(camera, rearImageReader, isRear = true, handler)
+                    stateListener?.onCameraStateChanged(CAMERA_REAR, true, "Active")
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
+                    Log.w(TAG, "Rear camera disconnected")
                     camera.close()
                     rearCameraDevice = null
+                    stateListener?.onCameraStateChanged(CAMERA_REAR, false, "Disconnected")
                 }
 
                 override fun onError(camera: CameraDevice, error: Int) {
-                    Log.e(TAG, "Rear camera open error: $error")
-                    camera.close()
+                    Log.e(TAG, "Rear camera error: $error")
+                    try { camera.close() } catch (_: Exception) {}
                     rearCameraDevice = null
+                    stateListener?.onCameraStateChanged(CAMERA_REAR, false, "Error code: $error")
                 }
             }, handler)
         } catch (e: Exception) {
-            Log.e(TAG, "Exception opening rear camera", e)
+            Log.e(TAG, "Exception opening rear camera: ${e.message}")
+            stateListener?.onCameraStateChanged(CAMERA_REAR, false, "Cannot open: ${e.message}")
         }
     }
 
@@ -158,21 +191,35 @@ class DualCameraManager(private val context: Context) {
                 override fun onOpened(camera: CameraDevice) {
                     frontCameraDevice = camera
                     createSession(camera, frontImageReader, isRear = false, handler)
+                    stateListener?.onCameraStateChanged(CAMERA_FRONT, true, "Active")
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
-                    camera.close()
+                    Log.w(TAG, "Front camera disconnected (hardware or driver issue)")
+                    try { camera.close() } catch (_: Exception) {}
                     frontCameraDevice = null
+                    stateListener?.onCameraStateChanged(CAMERA_FRONT, false, "Disconnected")
                 }
 
                 override fun onError(camera: CameraDevice, error: Int) {
-                    Log.e(TAG, "Front camera open error: $error")
-                    camera.close()
+                    Log.w(TAG, "Front camera error code $error (non-functional). Continuing with rear camera.")
+                    try { camera.close() } catch (_: Exception) {}
                     frontCameraDevice = null
+                    try {
+                        frontImageReader?.close()
+                        frontImageReader = null
+                    } catch (_: Exception) {}
+                    // Notify fault-tolerance without crashing
+                    stateListener?.onCameraStateChanged(
+                        CAMERA_FRONT,
+                        false,
+                        "Front camera not working (Code $error). Operating on available camera."
+                    )
                 }
             }, handler)
         } catch (e: Exception) {
-            Log.e(TAG, "Exception opening front camera", e)
+            Log.w(TAG, "Front camera failed to open: ${e.message}. Continuing with rear camera.")
+            stateListener?.onCameraStateChanged(CAMERA_FRONT, false, "Front camera unavailable: ${e.message}")
         }
     }
 
@@ -197,24 +244,44 @@ class DualCameraManager(private val context: Context) {
                         session.setRepeatingRequest(captureRequestBuilder.build(), null, handler)
                         Log.d(TAG, "${if (isRear) "Rear" else "Front"} repeating capture active")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Repeating request failed", e)
+                        Log.e(TAG, "${if (isRear) "Rear" else "Front"} repeating request failed", e)
+                        stateListener?.onCameraStateChanged(
+                            if (isRear) CAMERA_REAR else CAMERA_FRONT,
+                            false,
+                            "Repeating request error: ${e.message}"
+                        )
                     }
                 }
 
                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                    Log.e(TAG, "Session configuration failed for ${if (isRear) "Rear" else "Front"}")
+                    Log.w(TAG, "Capture session configuration failed for ${if (isRear) "Rear" else "Front"}")
+                    stateListener?.onCameraStateChanged(
+                        if (isRear) CAMERA_REAR else CAMERA_FRONT,
+                        false,
+                        "Session configuration failed"
+                    )
                 }
             }
 
             @Suppress("DEPRECATION")
             camera.createCaptureSession(listOf(surface), sessionCallback, handler)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed creating capture session", e)
+            Log.e(TAG, "Failed creating capture session for ${if (isRear) "Rear" else "Front"}", e)
+            stateListener?.onCameraStateChanged(
+                if (isRear) CAMERA_REAR else CAMERA_FRONT,
+                false,
+                "Capture session failed: ${e.message}"
+            )
         }
     }
 
     private fun processImage(reader: ImageReader, cameraCode: Byte) {
-        val image = reader.acquireLatestImage() ?: return
+        val image = try {
+            reader.acquireLatestImage()
+        } catch (e: Exception) {
+            null
+        } ?: return
+
         try {
             val planes = image.planes
             if (planes.isNotEmpty()) {
@@ -226,7 +293,7 @@ class DualCameraManager(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Error reading image buffer", e)
         } finally {
-            image.close()
+            try { image.close() } catch (_: Exception) {}
         }
     }
 

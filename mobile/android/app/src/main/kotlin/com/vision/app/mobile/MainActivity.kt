@@ -38,8 +38,9 @@ class MainActivity : FlutterActivity() {
                     val serverIp = call.argument<String>("serverIp") ?: ""
                     val serverPort = call.argument<Int>("serverPort") ?: 8000
                     val autoDiscover = call.argument<Boolean>("autoDiscover") ?: true
+                    val cameraMode = call.argument<String>("cameraMode") ?: "both"
 
-                    startBroadcastService(serverIp, serverPort, autoDiscover)
+                    startBroadcastService(serverIp, serverPort, autoDiscover, cameraMode)
                     result.success(true)
                 }
                 "stopBroadcast" -> {
@@ -85,12 +86,13 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun startBroadcastService(serverIp: String, serverPort: Int, autoDiscover: Boolean) {
+    private fun startBroadcastService(serverIp: String, serverPort: Int, autoDiscover: Boolean, cameraMode: String) {
         val intent = Intent(this, BackgroundStreamService::class.java).apply {
             action = BackgroundStreamService.ACTION_START
             putExtra(BackgroundStreamService.EXTRA_SERVER_IP, serverIp)
             putExtra(BackgroundStreamService.EXTRA_SERVER_PORT, serverPort)
             putExtra(BackgroundStreamService.EXTRA_AUTO_DISCOVER, autoDiscover)
+            putExtra(BackgroundStreamService.EXTRA_CAMERA_MODE, cameraMode)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)

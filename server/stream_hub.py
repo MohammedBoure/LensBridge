@@ -78,6 +78,11 @@ class StreamHub:
             "connected_at": "",
             "ip": "",
         }
+        self.camera_status: dict = {
+            "rear_active": True,
+            "front_active": False,
+            "front_message": "Standby",
+        }
 
     async def register_phone(self, websocket: WebSocket, client_ip: str, device_model: str = "Mobile"):
         """Registers the mobile phone as the active streaming source."""
@@ -91,6 +96,7 @@ class StreamHub:
         await self.broadcast_server_event({
             "type": "PHONE_CONNECTED",
             "phone_info": self.phone_info,
+            "camera_status": self.camera_status,
         })
 
     async def unregister_phone(self):
@@ -107,6 +113,7 @@ class StreamHub:
         await websocket.send_json({
             "type": "INITIAL_STATE",
             "phone_info": self.phone_info,
+            "camera_status": self.camera_status,
             "stats": self.get_stats(),
         })
         for cam_id in ["rear", "front"]:

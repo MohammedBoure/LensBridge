@@ -12,6 +12,8 @@ enum BroadcastStatus {
 }
 
 /// Service managing the lifecycle of the Android background dual camera broadcast.
+/// Includes fault-tolerant handling so that if one camera (e.g. front camera) is broken
+/// or disabled, the application continues running seamlessly.
 class StreamService extends ChangeNotifier {
   static const MethodChannel _methodChannel = MethodChannel('com.vision.app/stream');
   static const EventChannel _eventChannel = EventChannel('com.vision.app/events');
@@ -19,24 +21,46 @@ class StreamService extends ChangeNotifier {
   BroadcastStatus _status = BroadcastStatus.idle;
   String _statusMessage = 'Idle';
   String _activeServerIp = '';
+  String _cameraMode = 'both'; // 'both', 'rear', 'front'
   double _rearFps = 0.0;
   double _frontFps = 0.0;
   bool _isConcurrentSupported = false;
+
+  bool _isRearActive = false;
+  bool _isFrontActive = false;
+  String _rearStatusMessage = 'Standby';
+  String _frontStatusMessage = 'Standby';
 
   StreamSubscription? _eventSubscription;
 
   BroadcastStatus get status => _status;
   String get statusMessage => _statusMessage;
   String get activeServerIp => _activeServerIp;
+  String get cameraMode => _cameraMode;
   double get rearFps => _rearFps;
   double get frontFps => _frontFps;
   bool get isConcurrentSupported => _isConcurrentSupported;
   bool get isStreaming => _status == BroadcastStatus.streaming;
-  bool get isBroadcasting => _status == BroadcastStatus.streaming || _status == BroadcastStatus.connecting || _status == BroadcastStatus.discovering;
+  bool get isBroadcasting =>
+      _status == BroadcastStatus.streaming ||
+      _status == BroadcastStatus.connecting ||
+      _status == BroadcastStatus.discovering;
+
+  bool get isRearActive => _isRearActive;
+  bool get isFrontActive => _isFrontActive;
+  String get rearStatusMessage => _rearStatusMessage;
+  String get frontStatusMessage => _frontStatusMessage;
 
   StreamService() {
     _initEventChannel();
     checkHardwareSupport();
+  }
+
+  void setCameraMode(String mode) {
+    if (_cameraMode != mode) {
+      _cameraMode = mode;
+      notifyListeners();
+    }
   }
 
   void _initEventChannel() {
@@ -69,7 +93,13 @@ class StreamService extends ChangeNotifier {
       case 'STREAMING':
         _status = BroadcastStatus.streaming;
         _activeServerIp = data['serverIp'] as String? ?? _activeServerIp;
-        _statusMessage = 'Live Broadcasting (Dual Camera)';
+        _statusMessage = 'Live Broadcasting';
+        break;
+      case 'CAMERA_STATUS':
+        _isRearActive = data['rearActive'] as bool? ?? _isRearActive;
+        _rearStatusMessage = data['rearMessage'] as String? ?? _rearStatusMessage;
+        _isFrontActive = data['frontActive'] as bool? ?? _isFrontActive;
+        _frontStatusMessage = data['frontMessage'] as String? ?? _frontStatusMessage;
         break;
       case 'TELEMETRY':
         _rearFps = (data['rearFps'] as num?)?.toDouble() ?? _rearFps;
@@ -80,12 +110,18 @@ class StreamService extends ChangeNotifier {
         _statusMessage = data['reason'] as String? ?? 'Disconnected. Retrying...';
         _rearFps = 0.0;
         _frontFps = 0.0;
+        _isRearActive = false;
+        _isFrontActive = false;
         break;
       case 'STOPPED':
         _status = BroadcastStatus.idle;
         _statusMessage = 'Broadcast stopped';
         _rearFps = 0.0;
         _frontFps = 0.0;
+        _isRearActive = false;
+        _isFrontActive = false;
+        _rearStatusMessage = 'Standby';
+        _frontStatusMessage = 'Standby';
         break;
       default:
         break;
@@ -111,8 +147,12 @@ class StreamService extends ChangeNotifier {
     String? serverIp,
     int serverPort = 8000,
     bool autoDiscover = true,
+    String? cameraMode,
   }) async {
     try {
+      final mode = cameraMode ?? _cameraMode;
+      _cameraMode = mode;
+
       await requestPermissions();
       _status = autoDiscover ? BroadcastStatus.discovering : BroadcastStatus.connecting;
       _statusMessage = autoDiscover ? 'Scanning Wi-Fi for Desktop...' : 'Connecting to $serverIp...';
@@ -122,6 +162,7 @@ class StreamService extends ChangeNotifier {
         'serverIp': serverIp ?? '',
         'serverPort': serverPort,
         'autoDiscover': autoDiscover,
+        'cameraMode': mode,
       });
       return res ?? false;
     } catch (e) {
@@ -139,6 +180,8 @@ class StreamService extends ChangeNotifier {
       _statusMessage = 'Idle';
       _rearFps = 0.0;
       _frontFps = 0.0;
+      _isRearActive = false;
+      _isFrontActive = false;
       notifyListeners();
       return res ?? false;
     } catch (e) {

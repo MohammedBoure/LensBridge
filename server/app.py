@@ -79,6 +79,9 @@ async def websocket_phone_stream(websocket: WebSocket, device: str = Query("Mobi
                             "type": "DEVICE_INFO_UPDATED",
                             "phone_info": hub.phone_info,
                         })
+                    elif payload.get("type") == "CAMERA_STATUS":
+                        hub.camera_status = payload
+                        await hub.broadcast_server_event(payload)
                 except Exception:
                     pass
     except WebSocketDisconnect:

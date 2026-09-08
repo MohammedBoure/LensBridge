@@ -36,10 +36,10 @@ The mobile application runs continuously in the **background** (even when minimi
 
 ## Key Features
 
-1. **Simultaneous Dual Camera Capture**:
-   - Streams both the front and rear cameras concurrently.
+1. **Simultaneous Dual Camera Capture & Fault Tolerance**:
+   - Streams both the front and rear cameras concurrently, or operates in Back Camera Only mode.
+   - Designed with isolated error handling: if one camera sensor (such as a broken front camera) fails to open or is non-functional, the app catches the error, isolates it, and keeps streaming the working camera seamlessly without crashing or freezing.
    - Utilizes Android 11+ (`CameraManager.getConcurrentCameraIds()`) with hardware JPEG encoding.
-   - Features graceful fallback multi-sensor logic for devices with single-ISP hardware pipelines.
 
 2. **Uninterrupted Background Operation**:
    - Built on an Android Foreground Service (`BackgroundStreamService`) registered with `FOREGROUND_SERVICE_TYPE_CAMERA` and `FOREGROUND_SERVICE_TYPE_DATA_SYNC`.

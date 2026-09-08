@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import okhttp3.*
 import okio.ByteString
+import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -20,6 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Foreground Service that persists camera capture and WebSocket streaming
  * in the background even when the device is locked or the app is minimized.
+ * Supports fault-tolerant single or dual-camera streaming.
  */
 class BackgroundStreamService : Service() {
 
@@ -34,6 +36,7 @@ class BackgroundStreamService : Service() {
         const val EXTRA_SERVER_IP = "extra_server_ip"
         const val EXTRA_SERVER_PORT = "extra_server_port"
         const val EXTRA_AUTO_DISCOVER = "extra_auto_discover"
+        const val EXTRA_CAMERA_MODE = "extra_camera_mode"
 
         var isServiceRunning = false
             private set
@@ -51,9 +54,16 @@ class BackgroundStreamService : Service() {
     private var targetServerIp: String? = null
     private var targetServerPort: Int = 8000
     private var autoDiscover: Boolean = true
+    private var cameraMode: String = "both"
 
     private val isStreaming = AtomicBoolean(false)
     private var discoveryThread: Thread? = null
+
+    // Camera availability tracking
+    private var isRearActive = false
+    private var isFrontActive = false
+    private var rearMessage = "Standby"
+    private var frontMessage = "Standby"
 
     // Frame tracking for telemetry
     private var rearFramesCount = 0
@@ -107,6 +117,7 @@ class BackgroundStreamService : Service() {
                 targetServerIp = intent.getStringExtra(EXTRA_SERVER_IP)
                 targetServerPort = intent.getIntExtra(EXTRA_SERVER_PORT, 8000)
                 autoDiscover = intent.getBooleanExtra(EXTRA_AUTO_DISCOVER, true)
+                cameraMode = intent.getStringExtra(EXTRA_CAMERA_MODE) ?: "both"
 
                 startForegroundNotification()
                 isServiceRunning = true
@@ -126,9 +137,15 @@ class BackgroundStreamService : Service() {
     }
 
     private fun startForegroundNotification() {
+        val modeDesc = when (cameraMode) {
+            "rear" -> "Broadcasting rear camera in background"
+            "front" -> "Broadcasting front camera in background"
+            else -> "Broadcasting cameras in background"
+        }
+
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Vision Cam Active")
-            .setContentText("Broadcasting front & rear cameras in background")
+            .setContentText(modeDesc)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -220,23 +237,50 @@ class BackgroundStreamService : Service() {
                 isStreaming.set(true)
                 notifyEvent("STREAMING", mapOf("serverIp" to ip, "status" to "Connected"))
 
-                // Start hardware camera capture
-                cameraManager.startStreaming(640, 480, object : DualCameraManager.FrameListener {
-                    override fun onFrameAvailable(cameraCode: Byte, jpegBytes: ByteArray) {
-                        if (!isStreaming.get()) return
+                // Start hardware camera capture with fault-tolerant error listener
+                cameraManager.startStreaming(
+                    cameraMode = cameraMode,
+                    targetWidth = 640,
+                    targetHeight = 480,
+                    listener = object : DualCameraManager.FrameListener {
+                        override fun onFrameAvailable(cameraCode: Byte, jpegBytes: ByteArray) {
+                            if (!isStreaming.get()) return
 
-                        // Packet structure: [CameraCode (1 byte)] + [JPEG Bytes]
-                        val packet = ByteArray(1 + jpegBytes.size)
-                        packet[0] = cameraCode
-                        System.arraycopy(jpegBytes, 0, packet, 1, jpegBytes.size)
+                            // Packet structure: [CameraCode (1 byte)] + [JPEG Bytes]
+                            val packet = ByteArray(1 + jpegBytes.size)
+                            packet[0] = cameraCode
+                            System.arraycopy(jpegBytes, 0, packet, 1, jpegBytes.size)
 
-                        webSocket.send(ByteString.of(packet, 0, packet.size))
+                            webSocket.send(packet.toByteString(0, packet.size))
 
-                        // Update FPS metrics
-                        if (cameraCode == DualCameraManager.CAMERA_REAR) rearFramesCount++ else frontFramesCount++
-                        trackTelemetry()
+                            // Update FPS metrics
+                            if (cameraCode == DualCameraManager.CAMERA_REAR) rearFramesCount++ else frontFramesCount++
+                            trackTelemetry()
+                        }
+                    },
+                    statusListener = object : DualCameraManager.StateListener {
+                        override fun onCameraStateChanged(cameraCode: Byte, isAvailable: Boolean, message: String) {
+                            if (cameraCode == DualCameraManager.CAMERA_REAR) {
+                                isRearActive = isAvailable
+                                rearMessage = message
+                            } else {
+                                isFrontActive = isAvailable
+                                frontMessage = message
+                            }
+
+                            // Send state update to server
+                            sendCameraStatusToServer()
+
+                            // Notify Flutter UI
+                            notifyEvent("CAMERA_STATUS", mapOf(
+                                "rearActive" to isRearActive,
+                                "rearMessage" to rearMessage,
+                                "frontActive" to isFrontActive,
+                                "frontMessage" to frontMessage,
+                            ))
+                        }
                     }
-                })
+                )
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -259,6 +303,21 @@ class BackgroundStreamService : Service() {
                 notifyEvent("DISCONNECTED", mapOf("reason" to reason))
             }
         })
+    }
+
+    private fun sendCameraStatusToServer() {
+        try {
+            val json = JSONObject().apply {
+                put("type", "CAMERA_STATUS")
+                put("rear_active", isRearActive)
+                put("rear_message", rearMessage)
+                put("front_active", isFrontActive)
+                put("front_message", frontMessage)
+            }
+            webSocket?.send(json.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send camera status to server: ${e.message}")
+        }
     }
 
     private fun trackTelemetry() {

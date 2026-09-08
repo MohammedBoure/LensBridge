@@ -19,6 +19,7 @@ class StreamWorker(QtCore.QThread):
     rear_frame_signal = QtCore.Signal(QtGui.QPixmap)
     front_frame_signal = QtCore.Signal(QtGui.QPixmap)
     status_signal = QtCore.Signal(str, bool)
+    cam_status_signal = QtCore.Signal(dict)
 
     def __init__(self, port: int = HTTP_PORT):
         super().__init__()
@@ -63,6 +64,14 @@ class StreamWorker(QtCore.QThread):
                     self.rear_frame_signal.emit(pixmap)
                 else:
                     self.front_frame_signal.emit(pixmap)
+        elif isinstance(message, str):
+            try:
+                import json
+                data = json.loads(message)
+                if data.get("type") == "CAMERA_STATUS" or "camera_status" in data:
+                    self.cam_status_signal.emit(data.get("camera_status") or data)
+            except Exception:
+                pass
 
     def on_error(self, ws, error):
         self.status_signal.emit(f"Stream warning: {error}", False)
@@ -213,10 +222,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.rear_frame_signal.connect(self.rear_box.update_frame)
         self.worker.front_frame_signal.connect(self.front_box.update_frame)
         self.worker.status_signal.connect(self.update_status)
+        self.worker.cam_status_signal.connect(self.update_camera_status)
         self.worker.start()
 
     def update_status(self, msg: str, connected: bool):
         self.status_bar.showMessage(msg)
+
+    def update_camera_status(self, data: dict):
+        if data.get("front_active") is False:
+            msg = data.get("front_message") or "Hardware Offline / Broken"
+            self.front_box.video_label.setText(
+                f"FRONT CAMERA OFFLINE / BYPASSED\n\n({msg})\n\nStreaming Rear Camera Safely"
+            )
+            self.front_box.fps_label.setText("Bypassed")
 
     def open_web_browser(self):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(f"http://localhost:{self.port}"))

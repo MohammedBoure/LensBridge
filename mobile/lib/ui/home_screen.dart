@@ -8,6 +8,7 @@ import 'widgets/status_badge.dart';
 import 'widgets/stats_sheet.dart';
 
 /// Main interactive dashboard of the Vision Cam mobile application.
+/// Configured with fault tolerance for broken front cameras.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -22,11 +23,13 @@ class _HomeScreenState extends State<HomeScreen> {
   WifiInfo _wifiInfo = const WifiInfo(isWifiEnabled: false, ip: '0.0.0.0', ssid: 'Scanning...', rssi: 0);
   Timer? _wifiPollTimer;
   bool _autoDiscover = true;
+  String _selectedCameraMode = 'rear'; // Default to 'rear' since user's front camera is broken!
 
   @override
   void initState() {
     super.initState();
     _streamService.addListener(_onStreamStateChanged);
+    _streamService.setCameraMode(_selectedCameraMode);
     _refreshWifi();
     _wifiPollTimer = Timer.periodic(const Duration(seconds: 4), (_) => _refreshWifi());
   }
@@ -52,6 +55,7 @@ class _HomeScreenState extends State<HomeScreen> {
       await _streamService.startBroadcast(
         serverIp: ip,
         autoDiscover: _autoDiscover,
+        cameraMode: _selectedCameraMode,
       );
     }
   }
@@ -67,9 +71,17 @@ class _HomeScreenState extends State<HomeScreen> {
           activeServerIp: _streamService.activeServerIp,
           manualIpController: _manualIpController,
           autoDiscover: _autoDiscover,
+          cameraMode: _selectedCameraMode,
           onAutoDiscoverChanged: (val) {
             setModalState(() => _autoDiscover = val);
             setState(() => _autoDiscover = val);
+          },
+          onCameraModeChanged: (val) {
+            setModalState(() => _selectedCameraMode = val);
+            setState(() {
+              _selectedCameraMode = val;
+              _streamService.setCameraMode(val);
+            });
           },
           onSaveSettings: () {
             Navigator.pop(context);
@@ -95,6 +107,11 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final isStreaming = _streamService.isStreaming;
     final isBroadcasting = _streamService.isBroadcasting;
+
+    final isRearSelected = _selectedCameraMode == 'both' || _selectedCameraMode == 'rear';
+    final isFrontSelected = _selectedCameraMode == 'both' || _selectedCameraMode == 'front';
+
+    final bool isFrontFunctional = isFrontSelected && (!isStreaming || _streamService.isFrontActive);
 
     return Scaffold(
       backgroundColor: AppConfig.bgDark,
@@ -127,11 +144,11 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Wi-Fi and Discovery Status Badges
+              // Wi-Fi and Server Badges
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
@@ -152,9 +169,39 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
 
-              const SizedBox(height: 18),
+              const SizedBox(height: 14),
 
-              // Dual Camera Sensor Telemetry Cards
+              // Quick Mode Switcher Pill Tabs
+              Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: AppConfig.cardDark,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _buildModeTab(
+                        label: 'Back Only',
+                        mode: 'rear',
+                        isRecommended: true,
+                      ),
+                    ),
+                    Expanded(
+                      child: _buildModeTab(
+                        label: 'Dual Cams',
+                        mode: 'both',
+                        isRecommended: false,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 14),
+
+              // Camera Sensor Cards
               Expanded(
                 child: ListView(
                   physics: const BouncingScrollPhysics(),
@@ -163,24 +210,32 @@ class _HomeScreenState extends State<HomeScreen> {
                       title: 'Back Camera',
                       subtitle: 'Primary Environment Sensor',
                       icon: Icons.camera_rear,
-                      isStreaming: isStreaming,
+                      isStreaming: isStreaming && isRearSelected,
+                      isAvailable: isRearSelected,
                       fps: _streamService.rearFps,
                       themeColor: AppConfig.primaryCyan,
+                      statusNote: isRearSelected ? 'Broadcasting smoothly at high framerate.' : 'Disabled in mode settings.',
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 12),
                     CameraCard(
                       title: 'Front Camera',
-                      subtitle: 'Concurrent User Sensor',
+                      subtitle: 'User Sensor (Fault-Protected)',
                       icon: Icons.camera_front,
-                      isStreaming: isStreaming,
+                      isStreaming: isStreaming && isFrontSelected,
+                      isAvailable: isFrontFunctional,
                       fps: _streamService.frontFps,
                       themeColor: const Color(0xFFFF6B6B),
+                      statusNote: !isFrontSelected
+                          ? 'Bypassed (Back Camera Mode active for non-working front sensor).'
+                          : (isStreaming && !_streamService.isFrontActive
+                              ? 'Front camera not responding. App safely continuing with Back Camera.'
+                              : 'Front camera active with hardware fault-guard.'),
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 14),
 
-                    // Information box explaining background broadcast
+                    // Information box
                     Container(
-                      padding: const EdgeInsets.all(14),
+                      padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: Colors.white.withValues(alpha: 0.03),
                         borderRadius: BorderRadius.circular(12),
@@ -189,12 +244,12 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: const Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Icon(Icons.all_inclusive, size: 20, color: AppConfig.primaryBlue),
+                          Icon(Icons.shield_outlined, size: 20, color: AppConfig.accentGreen),
                           SizedBox(width: 10),
                           Expanded(
                             child: Text(
-                              'Background Mode: Camera and network streaming will stay active when you switch apps or turn off your phone screen.',
-                              style: TextStyle(fontSize: 12, color: AppConfig.textDim, height: 1.4),
+                              'Fault Protection Active: Even if one camera hardware fails or is broken, the broadcast runs continuously on the working sensor without interruption.',
+                              style: TextStyle(fontSize: 11, color: AppConfig.textDim, height: 1.4),
                             ),
                           ),
                         ],
@@ -204,9 +259,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
 
-              const SizedBox(height: 16),
+              const SizedBox(height: 14),
 
-              // Big Action Button
+              // Big Broadcast Button
               Container(
                 height: 56,
                 decoration: BoxDecoration(
@@ -250,6 +305,54 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeTab({required String label, required String mode, required bool isRecommended}) {
+    final isSelected = _selectedCameraMode == mode;
+    return GestureDetector(
+      onTap: () {
+        if (!_streamService.isBroadcasting) {
+          setState(() {
+            _selectedCameraMode = mode;
+            _streamService.setCameraMode(mode);
+          });
+        }
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? AppConfig.primaryBlue : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Center(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  color: isSelected ? Colors.white : AppConfig.textDim,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                  fontSize: 12,
+                ),
+              ),
+              if (isRecommended) ...[
+                const SizedBox(width: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: AppConfig.accentGreen.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text('SAFE', style: TextStyle(color: AppConfig.accentGreen, fontSize: 9, fontWeight: FontWeight.bold)),
+                ),
+              ],
             ],
           ),
         ),

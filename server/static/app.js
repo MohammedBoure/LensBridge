@@ -96,6 +96,19 @@ function handleJsonMessage(data) {
     rearOverlay.classList.remove('hidden');
     frontOverlay.classList.remove('hidden');
   }
+
+  if (data.type === 'CAMERA_STATUS' || data.camera_status) {
+    const camStatus = data.camera_status || data;
+    if (camStatus.front_active === false) {
+      frontOverlay.classList.remove('hidden');
+      const p = frontOverlay.querySelector('p');
+      const hint = frontOverlay.querySelector('.hint');
+      const loader = frontOverlay.querySelector('.loader-pulse');
+      if (p) p.textContent = 'Front Camera Offline / Bypassed';
+      if (hint) hint.textContent = camStatus.front_message || 'Running safely on Rear Camera';
+      if (loader) loader.style.display = 'none';
+    }
+  }
 }
 
 async function handleBinaryFrame(arrayBuffer) {

@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import '../../config/app_config.dart';
 
-/// Modal bottom sheet for network settings, hardware capabilities, and manual IP configuration.
+/// Modal bottom sheet for network settings, camera selection, and fault-tolerant configuration.
 class StatsSheet extends StatelessWidget {
   final bool isConcurrentSupported;
   final String activeServerIp;
   final TextEditingController manualIpController;
   final bool autoDiscover;
+  final String cameraMode;
   final ValueChanged<bool> onAutoDiscoverChanged;
+  final ValueChanged<String> onCameraModeChanged;
   final VoidCallback onSaveSettings;
 
   const StatsSheet({
@@ -16,7 +18,9 @@ class StatsSheet extends StatelessWidget {
     required this.activeServerIp,
     required this.manualIpController,
     required this.autoDiscover,
+    required this.cameraMode,
     required this.onAutoDiscoverChanged,
+    required this.onCameraModeChanged,
     required this.onSaveSettings,
   });
 
@@ -50,26 +54,66 @@ class StatsSheet extends StatelessWidget {
             ),
             const SizedBox(height: 18),
             const Text(
-              'Broadcast & Network Settings',
+              'Broadcast & Camera Settings',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
             ),
+            const SizedBox(height: 16),
+
+            // Camera Sensor Selection
+            const Text(
+              'Active Camera Mode',
+              style: TextStyle(color: AppConfig.textDim, fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.04),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              ),
+              child: Column(
+                children: [
+                  _buildCameraOption(
+                    title: 'Back Camera Only',
+                    subtitle: 'Recommended if your front camera is damaged or not working',
+                    value: 'rear',
+                    noteColor: AppConfig.accentGreen,
+                  ),
+                  const Divider(height: 1, color: Colors.white12),
+                  _buildCameraOption(
+                    title: 'Both Cameras (Dual Broadcast)',
+                    subtitle: 'Broadcasts both front & rear concurrently (with auto-fallback)',
+                    value: 'both',
+                    noteColor: AppConfig.textDim,
+                  ),
+                  const Divider(height: 1, color: Colors.white12),
+                  _buildCameraOption(
+                    title: 'Front Camera Only',
+                    subtitle: 'Broadcasts only the front selfie sensor',
+                    value: 'front',
+                    noteColor: AppConfig.textDim,
+                  ),
+                ],
+              ),
+            ),
+
             const SizedBox(height: 16),
 
             // Hardware Capability Pill
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: isConcurrentSupported ? AppConfig.accentGreen.withValues(alpha: 0.1) : Colors.orange.withValues(alpha: 0.1),
+                color: isConcurrentSupported ? AppConfig.accentGreen.withValues(alpha: 0.1) : Colors.blue.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
-                  color: isConcurrentSupported ? AppConfig.accentGreen.withValues(alpha: 0.3) : Colors.orange.withValues(alpha: 0.3),
+                  color: isConcurrentSupported ? AppConfig.accentGreen.withValues(alpha: 0.3) : Colors.blue.withValues(alpha: 0.3),
                 ),
               ),
               child: Row(
                 children: [
                   Icon(
                     isConcurrentSupported ? Icons.check_circle_outline : Icons.info_outline,
-                    color: isConcurrentSupported ? AppConfig.accentGreen : Colors.orange,
+                    color: isConcurrentSupported ? AppConfig.accentGreen : AppConfig.primaryBlue,
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -77,15 +121,13 @@ class StatsSheet extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          isConcurrentSupported
-                              ? 'Hardware Dual-ISP Active'
-                              : 'Standard Multi-Camera Mode',
+                          isConcurrentSupported ? 'Hardware Dual-ISP Active' : 'Fault-Tolerant Camera Guard Active',
                           style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.white, fontSize: 13),
                         ),
                         Text(
                           isConcurrentSupported
-                              ? 'Hardware supports concurrent front + rear sensors.'
-                              : 'Software multi-camera capture pipeline enabled.',
+                              ? 'Device hardware supports concurrent front & back sensors.'
+                              : 'If a camera fails or is broken, the app runs safely on the working sensor.',
                           style: const TextStyle(fontSize: 11, color: AppConfig.textDim),
                         ),
                       ],
@@ -95,7 +137,7 @@ class StatsSheet extends StatelessWidget {
               ),
             ),
 
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
 
             // Auto-Discovery Switch
             SwitchListTile(
@@ -129,29 +171,6 @@ class StatsSheet extends StatelessWidget {
 
             const SizedBox(height: 20),
 
-            // Background Service Notice
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.03),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.lock_clock, size: 20, color: AppConfig.primaryCyan),
-                  SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'Background execution uses Android Foreground Service to keep camera & Wi-Fi stream active even if screen is locked.',
-                      style: TextStyle(fontSize: 11, color: AppConfig.textDim),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 20),
-
             SizedBox(
               width: double.infinity,
               height: 46,
@@ -162,6 +181,66 @@ class StatsSheet extends StatelessWidget {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
                 child: const Text('Apply Settings', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCameraOption({
+    required String title,
+    required String subtitle,
+    required String value,
+    required Color noteColor,
+  }) {
+    final isSelected = cameraMode == value;
+    return InkWell(
+      onTap: () => onCameraModeChanged(value),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: isSelected ? AppConfig.primaryCyan : Colors.white38,
+                  width: 2,
+                ),
+              ),
+              child: isSelected
+                  ? Center(
+                      child: Container(
+                        width: 10,
+                        height: 10,
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AppConfig.primaryCyan,
+                        ),
+                      ),
+                    )
+                  : null,
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(subtitle, style: TextStyle(color: noteColor, fontSize: 11)),
+                ],
               ),
             ),
           ],
