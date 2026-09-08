@@ -1,54 +1,60 @@
 /**
- * Vision Core Live Dashboard Client
- * Low-latency dual camera WebSocket stream renderer.
+ * Vision Core Live Dashboard & Proxy Client
+ * Receives the back-camera feed and displays copyable stream endpoints.
  */
 
-// DOM Elements
-const rearCanvas = document.getElementById('rearCanvas');
-const frontCanvas = document.getElementById('frontCanvas');
-const rearCtx = rearCanvas.getContext('2d');
-const frontCtx = frontCanvas.getContext('2d');
-
-const rearOverlay = document.getElementById('rearOverlay');
-const frontOverlay = document.getElementById('frontOverlay');
+const videoCanvas = document.getElementById('videoCanvas');
+const ctx = videoCanvas.getContext('2d');
+const overlay = document.getElementById('overlay');
 
 const serverIpDisplay = document.getElementById('serverIpDisplay');
 const phoneStatusDisplay = document.getElementById('phoneStatusDisplay');
 const phoneDot = document.getElementById('phoneDot');
 
-const rearFps = document.getElementById('rearFps');
-const frontFps = document.getElementById('frontFps');
-const rearBitrate = document.getElementById('rearBitrate');
-const frontBitrate = document.getElementById('frontBitrate');
-const rearRes = document.getElementById('rearResolution');
-const frontRes = document.getElementById('frontResolution');
-
+const fpsText = document.getElementById('fpsText');
+const bitrateText = document.getElementById('bitrateText');
+const resText = document.getElementById('resolutionText');
 const deviceModelText = document.getElementById('deviceModelText');
 const totalFramesText = document.getElementById('totalFramesText');
-const wsStateText = document.getElementById('wsStateText');
-const viewport = document.getElementById('viewport');
+
+const mjpegInput = document.getElementById('mjpegUrl');
+const wsInput = document.getElementById('wsUrl');
+const snapInput = document.getElementById('snapUrl');
+const codeMjpegUrl = document.getElementById('codeMjpegUrl');
 
 let totalFrames = 0;
 let ws = null;
 let reconnectTimer = null;
 
-// Telemetry calculation
-const stats = {
-  rear: { frames: 0, bytes: 0, lastCheck: performance.now(), fps: 0 },
-  front: { frames: 0, bytes: 0, lastCheck: performance.now(), fps: 0 },
-};
+// Telemetry
+let frameCount = 0;
+let byteCount = 0;
+let lastCheck = performance.now();
+
+function populateUrls() {
+  const host = window.location.host;
+  const protocol = window.location.protocol;
+  const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
+
+  const mjpeg = `${protocol}//${host}/stream/video`;
+  const wsProxy = `${wsProtocol}//${host}/ws/proxy`;
+  const snap = `${protocol}//${host}/snapshot`;
+
+  mjpegInput.value = mjpeg;
+  wsInput.value = wsProxy;
+  snapInput.value = snap;
+  if (codeMjpegUrl) codeMjpegUrl.textContent = mjpeg;
+  serverIpDisplay.textContent = host;
+}
 
 function initWebSocket() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}/ws/client`;
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${wsProtocol}//${window.location.host}/ws/proxy`;
 
-  wsStateText.textContent = 'Connecting to Core...';
-  ws = new WebSocket(wsUrl);
+  ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
-    wsStateText.textContent = 'Active (Live Sync)';
-    serverIpDisplay.textContent = window.location.hostname;
     if (reconnectTimer) {
       clearInterval(reconnectTimer);
       reconnectTimer = null;
@@ -57,16 +63,18 @@ function initWebSocket() {
 
   ws.onmessage = async (event) => {
     if (typeof event.data === 'string') {
-      handleJsonMessage(JSON.parse(event.data));
+      try {
+        const data = JSON.parse(event.data);
+        handleControlMessage(data);
+      } catch (_) {}
     } else if (event.data instanceof ArrayBuffer) {
       handleBinaryFrame(event.data);
     }
   };
 
   ws.onclose = () => {
-    wsStateText.textContent = 'Disconnected (Reconnecting...)';
     phoneDot.className = 'status-dot red';
-    phoneStatusDisplay.textContent = 'Disconnected';
+    phoneStatusDisplay.textContent = 'Disconnected (Waiting...)';
     if (!reconnectTimer) {
       reconnectTimer = setInterval(initWebSocket, 2000);
     }
@@ -77,143 +85,95 @@ function initWebSocket() {
   };
 }
 
-function handleJsonMessage(data) {
-  if (data.type === 'INITIAL_STATE' || data.type === 'PHONE_CONNECTED' || data.type === 'DEVICE_INFO_UPDATED') {
+function handleControlMessage(data) {
+  if (data.type === 'PHONE_CONNECTED' || data.type === 'DEVICE_INFO_UPDATED') {
     const info = data.phone_info || {};
-    if (info.ip) {
-      phoneDot.className = 'status-dot green';
-      phoneStatusDisplay.textContent = `Connected (${info.ip})`;
-      deviceModelText.textContent = `${info.device_model || 'Mobile Device'}`;
-    } else {
-      phoneDot.className = 'status-dot red';
-      phoneStatusDisplay.textContent = 'Waiting for Mobile Wi-Fi Link...';
-      deviceModelText.textContent = 'Not Connected';
-    }
+    phoneDot.className = 'status-dot green';
+    phoneStatusDisplay.textContent = `Connected (${info.ip || 'Wi-Fi'})`;
+    deviceModelText.textContent = `${info.device_model || 'Mobile Device'}`;
   } else if (data.type === 'PHONE_DISCONNECTED') {
     phoneDot.className = 'status-dot red';
     phoneStatusDisplay.textContent = 'Phone Disconnected';
-    deviceModelText.textContent = 'Not Connected';
-    rearOverlay.classList.remove('hidden');
-    frontOverlay.classList.remove('hidden');
-  }
-
-  if (data.type === 'CAMERA_STATUS' || data.camera_status) {
-    const camStatus = data.camera_status || data;
-    if (camStatus.front_active === false) {
-      frontOverlay.classList.remove('hidden');
-      const p = frontOverlay.querySelector('p');
-      const hint = frontOverlay.querySelector('.hint');
-      const loader = frontOverlay.querySelector('.loader-pulse');
-      if (p) p.textContent = 'Front Camera Offline / Bypassed';
-      if (hint) hint.textContent = camStatus.front_message || 'Running safely on Rear Camera';
-      if (loader) loader.style.display = 'none';
-    }
+    deviceModelText.textContent = 'Waiting...';
+    overlay.classList.remove('hidden');
+    fpsText.textContent = '0.0';
   }
 }
 
 async function handleBinaryFrame(arrayBuffer) {
-  if (arrayBuffer.byteLength < 2) return;
-
-  const view = new Uint8Array(arrayBuffer);
-  const camCode = view[0]; // 0 = Rear, 1 = Front
-  const isRear = camCode === 0;
-
-  const jpegBytes = arrayBuffer.slice(1);
-  const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+  if (arrayBuffer.byteLength < 4) return;
 
   totalFrames++;
   totalFramesText.textContent = `${totalFrames} frames`;
 
-  // Update telemetry
-  const camStats = isRear ? stats.rear : stats.front;
-  camStats.frames++;
-  camStats.bytes += arrayBuffer.byteLength;
+  frameCount++;
+  byteCount += arrayBuffer.byteLength;
 
+  const blob = new Blob([arrayBuffer], { type: 'image/jpeg' });
   try {
     const bitmap = await createImageBitmap(blob);
-    const canvas = isRear ? rearCanvas : frontCanvas;
-    const ctx = isRear ? rearCtx : frontCtx;
-    const overlay = isRear ? rearOverlay : frontOverlay;
-    const resElem = isRear ? rearRes : frontRes;
-
-    if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      resElem.textContent = `${bitmap.width} x ${bitmap.height}`;
+    if (videoCanvas.width !== bitmap.width || videoCanvas.height !== bitmap.height) {
+      videoCanvas.width = bitmap.width;
+      videoCanvas.height = bitmap.height;
+      resText.textContent = `${bitmap.width} x ${bitmap.height}`;
     }
 
     ctx.drawImage(bitmap, 0, 0);
     overlay.classList.add('hidden');
     bitmap.close();
+
+    // Mark phone connected on receiving active frames
+    phoneDot.className = 'status-dot green';
+    phoneStatusDisplay.textContent = 'Live Streaming';
   } catch (e) {
     console.error('Frame decode error:', e);
   }
 }
 
-// Periodic FPS & Bitrate calculation
+// FPS calculation
 setInterval(() => {
   const now = performance.now();
-  ['rear', 'front'].forEach((cam) => {
-    const s = stats[cam];
-    const elapsed = (now - s.lastCheck) / 1000;
-    if (elapsed > 0.5) {
-      s.fps = (s.frames / elapsed).toFixed(1);
-      const kbps = Math.round((s.bytes * 8) / (elapsed * 1000));
-      s.frames = 0;
-      s.bytes = 0;
-      s.lastCheck = now;
-
-      if (cam === 'rear') {
-        rearFps.textContent = s.fps;
-        rearBitrate.textContent = kbps;
-      } else {
-        frontFps.textContent = s.fps;
-        frontBitrate.textContent = kbps;
-      }
-    }
-  });
+  const elapsed = (now - lastCheck) / 1000;
+  if (elapsed >= 1.0) {
+    const fps = (frameCount / elapsed).toFixed(1);
+    const kbps = Math.round((byteCount * 8) / (elapsed * 1000));
+    fpsText.textContent = fps;
+    bitrateText.textContent = kbps;
+    frameCount = 0;
+    byteCount = 0;
+    lastCheck = now;
+  }
 }, 1000);
 
-// Viewport mode buttons
-document.querySelectorAll('.btn-mode').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.btn-mode').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    const mode = btn.dataset.mode;
-    viewport.className = `streams-viewport mode-${mode}`;
+function copyToClipboard(elementId) {
+  const input = document.getElementById(elementId);
+  if (!input) return;
+  input.select();
+  navigator.clipboard.writeText(input.value).then(() => {
+    const originalText = input.nextElementSibling.textContent;
+    input.nextElementSibling.textContent = 'Copied!';
+    setTimeout(() => {
+      input.nextElementSibling.textContent = originalText;
+    }, 1500);
   });
-});
+}
 
-// Snapshot action
-function takeSnapshot(cam) {
-  const canvas = cam === 'rear' ? rearCanvas : frontCanvas;
-  if (!canvas.width || !canvas.height) return;
-
+function takeSnapshot() {
+  if (!videoCanvas.width || !videoCanvas.height) return;
   const link = document.createElement('a');
-  link.download = `vision_${cam}_${Date.now()}.jpg`;
-  link.href = canvas.toDataURL('image/jpeg', 0.95);
+  link.download = `back_camera_${Date.now()}.jpg`;
+  link.href = videoCanvas.toDataURL('image/jpeg', 0.95);
   link.click();
 }
 
-// Fullscreen toggle
-function toggleFullscreen(cardId) {
-  const card = document.getElementById(cardId);
+function toggleFullscreen() {
   if (!document.fullscreenElement) {
-    card.requestFullscreen().catch((err) => console.log(err));
+    videoCanvas.requestFullscreen().catch(() => {});
   } else {
     document.exitFullscreen();
   }
 }
 
-// Fetch initial status via REST API as fallback
-fetch('/api/status')
-  .then((r) => r.json())
-  .then((data) => {
-    if (data.local_ip) {
-      serverIpDisplay.textContent = `${data.local_ip}:${data.http_port}`;
-    }
-  })
-  .catch(() => {});
-
-// Start WebSocket connection
+// Initialize
+populateUrls();
 initWebSocket();

@@ -2,7 +2,7 @@
 
 Orchestrates:
 1. UDP Wi-Fi Auto-Discovery Service (port 45454)
-2. FastAPI Dual-Camera WebSocket Stream Server (port 8000)
+2. FastAPI Back-Camera WebSocket Stream Server & Proxy (port 8765)
 3. Hardware-accelerated Desktop GUI window (PySide6) or Web Dashboard
 """
 
@@ -26,7 +26,7 @@ def start_server_backend(host: str = DEFAULT_HOST, port: int = HTTP_PORT):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Vision Desktop Live Dual-Camera Server")
+    parser = argparse.ArgumentParser(description="Vision Back-Camera Stream Server & Proxy")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Host binding address")
     parser.add_argument("--port", type=int, default=HTTP_PORT, help="HTTP/WebSocket port")
     parser.add_argument("--no-gui", action="store_true", help="Run without PySide6 native GUI (launches browser)")
@@ -34,11 +34,13 @@ def main():
 
     local_ip = get_local_ip()
     print("=" * 60)
-    print("      VISION DUAL-CAMERA DESKTOP SERVER & HUB")
+    print("    VISION BACK-CAMERA STREAM SERVER & PROXY HUB")
     print("=" * 60)
     print(f"[*] Local Host IP   : {local_ip}")
     print(f"[*] Web Dashboard   : http://{local_ip}:{args.port}")
     print(f"[*] Phone Endpoint  : ws://{local_ip}:{args.port}/ws/phone")
+    print(f"[*] Proxy MJPEG     : http://{local_ip}:{args.port}/stream/video")
+    print(f"[*] Proxy WebSocket : ws://{local_ip}:{args.port}/ws/proxy")
     print(f"[*] UDP Discovery   : Broadcast & Listen on port {DISCOVERY_PORT}")
     print("=" * 60)
 

@@ -1,8 +1,8 @@
-# Vision • Concurrent Dual-Camera Background Streaming System
+# Vision • Mobile Camera Background Stream & Desktop Reverse Proxy System
 
-A complete end-to-end multi-platform project enabling continuous simultaneous broadcasting of both the phone's **rear (back)** and **front (selfie)** cameras over local Wi-Fi to a desktop server program.
+A complete end-to-end streaming solution that captures the phone's **back (rear) camera** in the background, streams it continuously over local Wi-Fi, and converts the stream on the desktop server into a **reverse proxy stream** for external and internal programs (e.g., OpenCV, AI pipelines, VLC, custom software).
 
-The mobile application runs continuously in the **background** (even when minimized or when the screen is locked) and discovers the desktop server **automatically** without requiring manual IP address configuration.
+The mobile app runs 24/7 as an Android Foreground Service with `WakeLock`/`WifiLock`, and the desktop server remains active continuously, ready to respond to discovery searches from the phone at any moment.
 
 ---
 
@@ -10,9 +10,10 @@ The mobile application runs continuously in the **background** (even when minimi
 
 ```
                        +-----------------------------------+
-                       |    Phone (Mobile Flutter App)    |
-                       | - Camera 0 (Rear) & Camera 1      |
-                       | - Android Foreground Service      |
+                       |    Phone (Mobile Flutter App)     |
+                       | - Back (Rear) Camera Streamer     |
+                       | - Fault-Tolerant Camera2 Engine   |
+                       | - Background Foreground Service   |
                        | - WakeLock + High-Perf WifiLock   |
                        +-----------------+-----------------+
                                          |
@@ -25,95 +26,114 @@ The mobile application runs continuously in the **background** (even when minimi
                        UDP Beacon(45454) |
                                          |
                        +-----------------+-----------------+
-                       |     Vision Desktop Server         |
-                       | - UDP Discovery Broadcaster       |
-                       | - Dual-Stream WebSocket Hub       |
-                       | - PySide6 GUI / Web Dashboard     |
-                       +-----------------------------------+
+                       |    Vision Desktop Server & Proxy  |
+                       | - Always-On UDP Discovery Listener|
+                       | - Back-Camera Stream Ingestion    |
+                       | - Native PySide6 GUI Monitor      |
+                       +-----------------+-----------------+
+                                         |
+               +-------------------------+-------------------------+
+               |                         |                         |
+               v                         v                         v
+     [ HTTP MJPEG Proxy ]      [ WebSocket Proxy ]      [ Single Snapshot ]
+   http://<IP>:8765/stream/video  ws://<IP>:8765/ws/proxy   http://<IP>:8765/snapshot
+               |                         |                         |
+               +-------------------------+-------------------------+
+                                         |
+                                         v
+                      +--------------------------------------+
+                      |      Other Internal Applications     |
+                      | - OpenCV (cv2.VideoCapture)          |
+                      | - AI / ML Vision Inference Pipelines |
+                      | - VLC / Media Players / FFmpeg       |
+                      | - Custom Internal Software / Tools   |
+                      +--------------------------------------+
 ```
 
 ---
 
 ## Key Features
 
-1. **Simultaneous Dual Camera Capture & Fault Tolerance**:
-   - Streams both the front and rear cameras concurrently, or operates in Back Camera Only mode.
-   - Designed with isolated error handling: if one camera sensor (such as a broken front camera) fails to open or is non-functional, the app catches the error, isolates it, and keeps streaming the working camera seamlessly without crashing or freezing.
-   - Utilizes Android 11+ (`CameraManager.getConcurrentCameraIds()`) with hardware JPEG encoding.
+1. **Back-Camera Streaming & Fault Isolation**:
+   - Focuses exclusively on the phone's back camera for optimal throughput and clarity.
+   - Fault-tolerant hardware engine: if the front camera is broken, the app isolates the error and runs in "Back Camera Only" mode without freezing or crashing.
 
-2. **Uninterrupted Background Operation**:
-   - Built on an Android Foreground Service (`BackgroundStreamService`) registered with `FOREGROUND_SERVICE_TYPE_CAMERA` and `FOREGROUND_SERVICE_TYPE_DATA_SYNC`.
-   - Displays an ongoing persistent notification.
-   - Holds a CPU `PARTIAL_WAKE_LOCK` and a `WIFI_MODE_FULL_HIGH_PERF` lock so the camera capture and network transmission stay alive even when the phone screen turns off.
+2. **Reverse / Proxy Stream for Internal Programs**:
+   - **HTTP MJPEG Stream** (`http://127.0.0.1:8765/stream/video` or `/video_feed`): Zero-configuration stream compatible with OpenCV `cv2.VideoCapture`, VLC, FFmpeg, and browsers.
+   - **Low-Latency WebSocket Proxy** (`ws://127.0.0.1:8765/ws/proxy`): Sub-10ms direct binary JPEG stream.
+   - **Snapshot API** (`http://127.0.0.1:8765/snapshot`): High-speed single-frame capture for image analysis scripts.
 
-3. **Zero-Configuration Wi-Fi Auto-Discovery**:
-   - The desktop server broadcasts announcements on UDP port `45454` and responds to mobile probe beacons.
-   - When the phone opens or connects to Wi-Fi, it auto-detects the server's local IP address and establishes the WebSocket stream automatically.
-   - Manual IP override is also available for networks with strict Wi-Fi AP client isolation.
+3. **24/7 Always-On Server & On-Demand Discovery**:
+   - Desktop backend runs continuously without stopping. If the phone disconnects or switches networks, the server stays online waiting for the next connection.
+   - UDP discovery service binds on port `45454`, replying to phone searches the instant broadcast is started.
 
-4. **Desktop Live Monitor (Native GUI + Web Dashboard)**:
-   - **Native Windows GUI**: Fast, hardware-accelerated desktop viewer window built with PySide6.
-   - **Modern Web Dashboard**: Responsive dark glassmorphic HTML5 Canvas viewer with Split Screen, Picture-in-Picture (PiP), Single Camera zoom, live FPS telemetry, and instant snapshot captures.
+4. **Continuous Background Operation on Phone**:
+   - Android Foreground Service with persistent notification.
+   - Holds `WakeLock` and `WifiLock` so transmission continues even when the screen is turned off or apps are switched.
 
 ---
 
 ## Directory Structure
 
-- **`server/`**: The desktop program (Python, FastAPI, WebSocket Hub, PySide6 Desktop GUI, and Web dashboard).
-  - **`config.py`**: Port definitions, local IP detection, and streaming defaults.
-  - **`discovery.py`**: UDP auto-discovery beacon and probe responder service.
-  - **`stream_hub.py`**: Central WebSocket manager receiving dual camera frames and routing to desktop viewers.
-  - **`app.py`**: FastAPI application serving REST endpoints and WebSockets (`/ws/phone` and `/ws/client`).
-  - **`desktop_gui.py`**: Native Windows PySide6 dual-camera desktop GUI window.
-  - **`main.py`**: Main launcher orchestrating discovery, backend server, and desktop GUI.
-  - **`run_server.bat`**: Double-clickable Windows launcher batch script.
-  - **`static/`**: Web viewer assets (`index.html`, `style.css`, `app.js`).
-- **`mobile/`**: The Flutter mobile application.
-  - **`lib/`**: Flutter UI, state controllers, Wi-Fi service, and settings.
-  - **`android/`**: Android native layer with `DualCameraManager.kt`, `BackgroundStreamService.kt`, and permissions in `AndroidManifest.xml`.
-  - **`pubspec.yaml`**: Flutter configuration and dependencies.
+- **`server/`**: Desktop program, reverse proxy engine, UDP discovery, and viewer.
+  - **`config.py`**: Port settings (`8765` HTTP, `45454` UDP), IP detection, and parameters.
+  - **`discovery.py`**: UDP discovery responder on port `45454`.
+  - **`stream_hub.py`**: Central back-camera stream proxy broker with queue-based MJPEG pub/sub.
+  - **`app.py`**: FastAPI application exposing `/stream/video`, `/ws/proxy`, `/snapshot`, and `/ws/phone`.
+  - **`desktop_gui.py`**: PySide6 desktop monitor with live video feed and proxy URLs.
+  - **`main.py`**: Main entry point launching backend, discovery, and desktop monitor.
+  - **`run_server.bat`**: Double-clickable Windows batch launcher.
+  - **`static/`**: Web dashboard assets for browser viewing.
+- **`mobile/`**: Flutter mobile application.
+  - **`lib/`**: Flutter UI, IP/port settings, and stream controllers.
+  - **`android/`**: Native Android layer (`DualCameraManager.kt`, `BackgroundStreamService.kt`).
+  - **`pubspec.yaml`**: Flutter package configuration.
 
 ---
 
 ## Quick Start Guide
 
-### 1. Launching the Desktop Server Program
+### 1. Launch the Desktop Server & Proxy
 
-From the repository root on Windows:
+Double-click `server/run_server.bat` or run from PowerShell:
 
 ```powershell
-# Method 1: Double-click or run the batch launcher
-.\server\run_server.bat
-
-# Method 2: Run directly with Python
 cd server
 py main.py
 ```
 
-- The desktop server will start its UDP Auto-Discovery beacon on port `45454`.
-- The PySide6 Desktop GUI window will appear displaying side-by-side feeds for the **Rear Camera** and **Front Camera**.
-- You can also view the stream in your browser at `http://localhost:8765`.
+The desktop program will display:
+- Live back camera feed.
+- Ready-to-copy proxy URLs for MJPEG, WebSocket, and Snapshot.
+- UDP discovery active on port `45454`.
 
-### 2. Running the Mobile Application
+### 2. Connect from Another Internal Program (OpenCV)
 
-Ensure your phone and PC are connected to the same Wi-Fi network.
+```python
+import cv2
 
-```powershell
-cd mobile
-flutter run
+# Connect to the local proxy MJPEG stream
+cap = cv2.VideoCapture("http://127.0.0.1:8765/stream/video")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        continue
+    
+    cv2.imshow("Back Camera Live Proxy", frame)
+    if cv2.waitKey(1) == 27: # ESC key to exit
+        break
+
+cap.release()
+cv2.destroyAllWindows()
 ```
 
-Or build the release APK and install it on your phone:
+### 3. Launch the Phone Application
 
-```powershell
-cd mobile
-flutter build apk --release
-```
-
-Install the APK located at:
+Install the release APK located at:
 `mobile/build/app/outputs/flutter-apk/app-release.apk`
 
-1. Open the app on your phone and grant camera and notification permissions.
-2. Tap **"START BACKGROUND BROADCAST"**.
-3. The app will automatically discover your PC on the Wi-Fi network, establish the stream, and broadcast both cameras simultaneously.
-4. You can minimize the app or lock your phone screen; streaming will continue uninterrupted.
+1. Open the app and tap **"START BACKGROUND BROADCAST"**.
+2. The phone automatically discovers your PC on port `45454` and connects to `ws://<PC-IP>:8765/ws/phone`.
+3. You can also specify the PC IP manually (e.g., `192.168.1.150` or `10.0.2.2` for emulator).
+4. Lock the screen or minimize the app; the stream runs continuously in the background.

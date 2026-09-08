@@ -1,22 +1,21 @@
-"""Stream Hub for managing dual camera video streams and client connections.
+"""Stream Hub for Vision Desktop Server.
 
-Receives concurrent rear and front camera frames from the mobile application,
-tracks frame rates and diagnostics, and broadcasts live feeds to desktop viewers.
+Focuses exclusively on the back (rear) camera stream and acts as a high-performance
+video proxy/bridge forwarding live frames to internal programs via HTTP MJPEG,
+WebSocket, and REST snapshot endpoints.
 """
 
 import asyncio
-import base64
 import collections
 import time
 from typing import Dict, Optional, Set
 from fastapi import WebSocket
 
 
-class CameraStats:
-    """Tracks performance metrics (FPS, bandwidth, frame count) for a single camera stream."""
+class StreamStats:
+    """Tracks framerate, bitrate, and frame count for the back camera stream."""
 
-    def __init__(self, name: str):
-        self.name = name
+    def __init__(self):
         self.frame_count = 0
         self.total_bytes = 0
         self.current_fps = 0.0
@@ -26,7 +25,6 @@ class CameraStats:
         self._bytes_history = collections.deque(maxlen=30)
 
     def record_frame(self, frame_size: int):
-        """Records a newly arrived frame and updates rolling statistics."""
         now = time.time()
         self.frame_count += 1
         self.total_bytes += frame_size
@@ -43,10 +41,8 @@ class CameraStats:
                 self.bitrate_kbps = round((window_bytes * 8) / (duration * 1000), 1)
 
     def to_dict(self) -> dict:
-        """Returns statistics snapshot as a dictionary."""
         is_active = (time.time() - self.last_frame_time) < 3.0 if self.last_frame_time > 0 else False
         return {
-            "name": self.name,
             "active": is_active,
             "fps": self.current_fps if is_active else 0.0,
             "bitrate_kbps": self.bitrate_kbps if is_active else 0.0,
@@ -56,32 +52,21 @@ class CameraStats:
 
 
 class StreamHub:
-    """Central broker coordinating mobile phone video streams and desktop viewers."""
+    """Central proxy broker coordinating mobile camera stream and external internal programs."""
 
     def __init__(self):
         self.phone_socket: Optional[WebSocket] = None
-        self.desktop_viewers: Set[WebSocket] = set()
+        self.proxy_clients: Set[WebSocket] = set()
+        self.latest_frame: bytes = b""
+        self.stats = StreamStats()
 
-        # Cache latest frame for both cameras (bytes)
-        self.latest_frames: Dict[str, bytes] = {
-            "rear": b"",
-            "front": b"",
-        }
+        # Active queue subscribers for HTTP MJPEG streaming
+        self._mjpeg_subscribers: Set[asyncio.Queue] = set()
 
-        # Stream statistics
-        self.stats = {
-            "rear": CameraStats("Rear Camera"),
-            "front": CameraStats("Front Camera"),
-        }
         self.phone_info: Dict[str, str] = {
-            "device_model": "Unknown",
+            "device_model": "None",
             "connected_at": "",
             "ip": "",
-        }
-        self.camera_status: dict = {
-            "rear_active": True,
-            "front_active": False,
-            "front_message": "Standby",
         }
 
     async def register_phone(self, websocket: WebSocket, client_ip: str, device_model: str = "Mobile"):
@@ -93,92 +78,130 @@ class StreamHub:
             "ip": client_ip,
         }
         print(f"[StreamHub] Phone connected from {client_ip} ({device_model})")
-        await self.broadcast_server_event({
+        await self.broadcast_event({
             "type": "PHONE_CONNECTED",
             "phone_info": self.phone_info,
-            "camera_status": self.camera_status,
         })
 
     async def unregister_phone(self):
-        """Handles phone disconnection."""
-        print("[StreamHub] Phone disconnected.")
+        """Handles phone disconnection gracefully without stopping the proxy server."""
+        print("[StreamHub] Phone disconnected. Waiting for reconnection...")
         self.phone_socket = None
         self.phone_info = {"device_model": "None", "connected_at": "", "ip": ""}
-        await self.broadcast_server_event({"type": "PHONE_DISCONNECTED"})
+        await self.broadcast_event({"type": "PHONE_DISCONNECTED"})
 
-    async def register_viewer(self, websocket: WebSocket):
-        """Registers a desktop viewer client."""
-        self.desktop_viewers.add(websocket)
-        # Send initial status & cached frames immediately
-        await websocket.send_json({
-            "type": "INITIAL_STATE",
-            "phone_info": self.phone_info,
-            "camera_status": self.camera_status,
-            "stats": self.get_stats(),
-        })
-        for cam_id in ["rear", "front"]:
-            if self.latest_frames[cam_id]:
-                # Send latest cached frame
-                prefix = 0x00 if cam_id == "rear" else 0x01
-                await websocket.send_bytes(bytes([prefix]) + self.latest_frames[cam_id])
+    async def register_proxy(self, websocket: WebSocket):
+        """Registers an internal program or viewer to receive live raw frames."""
+        self.proxy_clients.add(websocket)
+        # Send latest frame immediately if available
+        if self.latest_frame:
+            try:
+                await websocket.send_bytes(self.latest_frame)
+            except Exception:
+                pass
 
-    def unregister_viewer(self, websocket: WebSocket):
-        """Removes a desktop viewer client."""
-        self.desktop_viewers.discard(websocket)
+    def unregister_proxy(self, websocket: WebSocket):
+        """Removes a proxy client upon disconnection."""
+        self.proxy_clients.discard(websocket)
 
     async def handle_incoming_frame(self, raw_bytes: bytes):
         """
         Processes a raw binary frame from the mobile application.
 
         Byte layout:
-          - Byte 0: Camera Identifier (0x00 = Rear, 0x01 = Front)
-          - Bytes 1..N: JPEG compressed image payload
+          - If prefixed: Byte 0 is camera code (0x00=Rear, 0x01=Front).
+            We process Rear camera (0x00) frames or non-prefixed JPEG bytes.
         """
-        if len(raw_bytes) < 2:
+        if len(raw_bytes) < 4:
             return
 
-        camera_code = raw_bytes[0]
-        camera_id = "rear" if camera_code == 0x00 else "front"
-        jpeg_payload = raw_bytes[1:]
+        # Check if first byte is a camera prefix
+        if raw_bytes[0] == 0x01:
+            # Skip front camera frames; backend focuses exclusively on rear camera
+            return
 
-        # Update stats and frame cache
-        self.latest_frames[camera_id] = jpeg_payload
-        self.stats[camera_id].record_frame(len(jpeg_payload))
+        if raw_bytes[0] == 0x00:
+            jpeg_payload = raw_bytes[1:]
+        else:
+            jpeg_payload = raw_bytes
 
-        # Forward directly to all desktop viewers
-        if self.desktop_viewers:
-            dead_viewers = []
-            for viewer in self.desktop_viewers:
+        # Update cache and telemetry
+        self.latest_frame = jpeg_payload
+        self.stats.record_frame(len(jpeg_payload))
+
+        # Forward directly to all HTTP MJPEG stream queues
+        for q in list(self._mjpeg_subscribers):
+            if q.full():
                 try:
-                    await viewer.send_bytes(raw_bytes)
-                except Exception:
-                    dead_viewers.append(viewer)
-
-            for dead in dead_viewers:
-                self.desktop_viewers.discard(dead)
-
-    async def broadcast_server_event(self, event_dict: dict):
-        """Broadcasts a JSON control event to all desktop viewers."""
-        if not self.desktop_viewers:
-            return
-        dead_viewers = []
-        for viewer in self.desktop_viewers:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
             try:
-                await viewer.send_json(event_dict)
-            except Exception:
-                dead_viewers.append(viewer)
+                q.put_nowait(jpeg_payload)
+            except asyncio.QueueFull:
+                pass
 
-        for dead in dead_viewers:
-            self.desktop_viewers.discard(dead)
+        # Forward directly to internal proxy WebSocket clients
+        if self.proxy_clients:
+            dead_clients = []
+            for client in self.proxy_clients:
+                try:
+                    await client.send_bytes(jpeg_payload)
+                except Exception:
+                    dead_clients.append(client)
+
+            for dead in dead_clients:
+                self.proxy_clients.discard(dead)
+
+    async def broadcast_event(self, event_dict: dict):
+        """Broadcasts a JSON control event to all proxy clients."""
+        if not self.proxy_clients:
+            return
+        dead_clients = []
+        for client in self.proxy_clients:
+            try:
+                await client.send_json(event_dict)
+            except Exception:
+                dead_clients.append(client)
+
+        for dead in dead_clients:
+            self.proxy_clients.discard(dead)
+
+    async def generate_mjpeg_stream(self):
+        """
+        Asynchronous generator for HTTP multipart/x-mixed-replace MJPEG video stream.
+        Universal compatibility for OpenCV, VLC, web browsers, and internal programs.
+        """
+        q = asyncio.Queue(maxsize=3)
+        if self.latest_frame:
+            q.put_nowait(self.latest_frame)
+        self._mjpeg_subscribers.add(q)
+        try:
+            while True:
+                try:
+                    frame = await asyncio.wait_for(q.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    if self.latest_frame:
+                        frame = self.latest_frame
+                    else:
+                        continue
+
+                header = (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n"
+                )
+                yield header + frame + b"\r\n"
+        finally:
+            self._mjpeg_subscribers.discard(q)
 
     def get_stats(self) -> dict:
-        """Returns comprehensive streaming diagnostics."""
+        """Returns streaming telemetry and connection state."""
         return {
             "phone_connected": self.phone_socket is not None,
             "phone_info": self.phone_info,
-            "rear": self.stats["rear"].to_dict(),
-            "front": self.stats["front"].to_dict(),
-            "viewer_count": len(self.desktop_viewers),
+            "stream": self.stats.to_dict(),
+            "proxy_clients_count": len(self.proxy_clients),
         }
 
 

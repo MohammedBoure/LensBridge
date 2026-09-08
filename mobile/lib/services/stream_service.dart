@@ -145,7 +145,7 @@ class StreamService extends ChangeNotifier {
 
   Future<bool> startBroadcast({
     String? serverIp,
-    int serverPort = 8000,
+    int serverPort = 8765,
     bool autoDiscover = true,
     String? cameraMode,
   }) async {

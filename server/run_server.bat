@@ -1,8 +1,8 @@
 @echo off
-title Vision Dual-Camera Desktop Server
+title Vision Back-Camera Stream Server & Proxy
 cd /d "%~dp0"
 echo ====================================================
-echo Starting Vision Dual-Camera Desktop Server...
+echo Starting Vision Back-Camera Stream Server & Proxy...
 echo ====================================================
 py main.py
 if %ERRORLEVEL% NEQ 0 (

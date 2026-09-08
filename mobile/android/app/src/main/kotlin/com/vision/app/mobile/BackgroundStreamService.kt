@@ -63,7 +63,7 @@ class BackgroundStreamService : Service() {
     private var webSocket: WebSocket? = null
 
     private var targetServerIp: String? = null
-    private var targetServerPort: Int = 8000
+    private var targetServerPort: Int = 8765
     private var autoDiscover: Boolean = true
     private var cameraMode: String = "rear"
 
@@ -134,7 +134,7 @@ class BackgroundStreamService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 targetServerIp = intent.getStringExtra(EXTRA_SERVER_IP)?.trim()
-                targetServerPort = intent.getIntExtra(EXTRA_SERVER_PORT, 8000)
+                targetServerPort = intent.getIntExtra(EXTRA_SERVER_PORT, 8765)
                 autoDiscover = intent.getBooleanExtra(EXTRA_AUTO_DISCOVER, true)
                 cameraMode = intent.getStringExtra(EXTRA_CAMERA_MODE) ?: "rear"
 
@@ -239,7 +239,7 @@ class BackgroundStreamService : Service() {
 
                         if (json.optString("type") == "VISION_SERVER_ANNOUNCE") {
                             var ip = json.optString("ip", responsePacket.address.hostAddress)
-                            val port = json.optInt("port", 8000)
+                            val port = json.optInt("port", 8765)
 
                             if (isEmulator() && (ip == "127.0.0.1" || ip.startsWith("192.168."))) {
                                 ip = "10.0.2.2"

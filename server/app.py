@@ -1,18 +1,18 @@
-"""FastAPI application for Vision Desktop Server.
+"""FastAPI application for Vision Desktop Server & Stream Proxy.
 
-Serves REST endpoints, WebSocket streaming channels, and modern HTML5 dashboard.
+Provides HTTP MJPEG video stream, raw WebSocket proxy, snapshot API,
+and browser dashboard for converting the mobile camera stream to internal programs.
 """
 
-import io
 import json
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, Query
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from config import HTTP_PORT, get_local_ip
 from stream_hub import hub
 
-app = FastAPI(title="Vision Dual-Camera Server", version="1.0.0")
+app = FastAPI(title="Vision Back-Camera Stream Proxy", version="2.0.0")
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 if not os.path.exists(STATIC_DIR):
@@ -23,49 +23,66 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
-    """Serves the main desktop live viewer dashboard."""
+    """Serves the main desktop live viewer and proxy control dashboard."""
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return HTMLResponse("<h1>Vision Server Running. Static dashboard missing.</h1>")
+    return HTMLResponse("<h1>Vision Server Running. Proxy active.</h1>")
 
 
 @app.get("/api/status")
 async def get_status():
-    """Returns the current server and dual camera streaming status."""
+    """Returns current server status, proxy stream URLs, and telemetry."""
+    local_ip = get_local_ip()
     return {
         "status": "online",
-        "local_ip": get_local_ip(),
+        "local_ip": local_ip,
         "http_port": HTTP_PORT,
+        "proxy_urls": {
+            "mjpeg_stream": f"http://{local_ip}:{HTTP_PORT}/stream/video",
+            "mjpeg_alias": f"http://{local_ip}:{HTTP_PORT}/video_feed",
+            "websocket_proxy": f"ws://{local_ip}:{HTTP_PORT}/ws/proxy",
+            "snapshot": f"http://{local_ip}:{HTTP_PORT}/snapshot",
+        },
         "metrics": hub.get_stats(),
     }
 
 
-@app.get("/api/snapshot/{camera}")
-async def get_snapshot(camera: str):
-    """Returns the latest captured JPEG snapshot from the specified camera ('rear' or 'front')."""
-    cam_key = camera.lower()
-    if cam_key not in hub.latest_frames or not hub.latest_frames[cam_key]:
-        return Response(content=b"No frame available yet", status_code=404, media_type="text/plain")
+@app.get("/stream/video")
+@app.get("/video_feed")
+async def get_video_stream():
+    """
+    Universal HTTP multipart/x-mixed-replace MJPEG video stream.
+    Directly consumable by OpenCV (cv2.VideoCapture), VLC, FFmpeg, and web browsers.
+    """
+    return StreamingResponse(
+        hub.generate_mjpeg_stream(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
-    return Response(content=hub.latest_frames[cam_key], media_type="image/jpeg")
+
+@app.get("/snapshot")
+@app.get("/snapshot.jpg")
+async def get_latest_snapshot():
+    """Returns the latest captured JPEG frame from the back camera."""
+    if not hub.latest_frame:
+        return Response(content=b"No frame received yet", status_code=404, media_type="text/plain")
+    return Response(content=hub.latest_frame, media_type="image/jpeg")
 
 
 @app.websocket("/ws/phone")
-async def websocket_phone_stream(websocket: WebSocket, device: str = Query("Mobile Device")):
+async def websocket_phone_endpoint(websocket: WebSocket):
     """
-    WebSocket channel for the mobile phone.
-
-    Receives binary video frames containing concurrent front and rear camera feeds.
-    Format: [1-byte camera index (0=rear, 1=front)] + [JPEG payload bytes]
+    Incoming WebSocket channel from the mobile application.
+    Accepts continuous back camera video frames.
     """
     await websocket.accept()
+    device = websocket.query_params.get("device", "Mobile Phone")
     client_ip = websocket.client.host if websocket.client else "Unknown"
     await hub.register_phone(websocket, client_ip, device)
 
     try:
         while True:
-            # Handle incoming binary frame or json metadata
             message = await websocket.receive()
             if "bytes" in message and message["bytes"]:
                 await hub.handle_incoming_frame(message["bytes"])
@@ -75,13 +92,10 @@ async def websocket_phone_stream(websocket: WebSocket, device: str = Query("Mobi
                     if payload.get("type") == "DEVICE_INFO":
                         hub.phone_info["device_model"] = payload.get("device_model", device)
                         hub.phone_info["battery"] = payload.get("battery", "N/A")
-                        await hub.broadcast_server_event({
+                        await hub.broadcast_event({
                             "type": "DEVICE_INFO_UPDATED",
                             "phone_info": hub.phone_info,
                         })
-                    elif payload.get("type") == "CAMERA_STATUS":
-                        hub.camera_status = payload
-                        await hub.broadcast_server_event(payload)
                 except Exception:
                     pass
     except WebSocketDisconnect:
@@ -91,22 +105,22 @@ async def websocket_phone_stream(websocket: WebSocket, device: str = Query("Mobi
         await hub.unregister_phone()
 
 
-@app.websocket("/ws/client")
-async def websocket_desktop_client(websocket: WebSocket):
+@app.websocket("/ws/proxy")
+async def websocket_proxy_endpoint(websocket: WebSocket):
     """
-    WebSocket channel for desktop viewer clients.
-
-    Broadcasts real-time frames for both rear and front cameras as well as stats.
+    Proxy WebSocket channel for internal applications.
+    Broadcasts raw JPEG binary frames directly with sub-10ms latency.
     """
     await websocket.accept()
-    await hub.register_viewer(websocket)
+    await hub.register_proxy(websocket)
+
     try:
         while True:
-            # Keep-alive / command receiver from viewer (e.g. ping, request snapshot)
+            # Keep-alive ping receiver from internal client
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
-        hub.unregister_viewer(websocket)
+        hub.unregister_proxy(websocket)
     except Exception:
-        hub.unregister_viewer(websocket)
+        hub.unregister_proxy(websocket)

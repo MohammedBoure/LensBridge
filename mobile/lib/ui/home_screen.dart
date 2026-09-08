@@ -21,7 +21,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final StreamService _streamService = StreamService();
   final TextEditingController _serverIpController = TextEditingController(text: '192.168.1.150');
-  final TextEditingController _serverPortController = TextEditingController(text: '8000');
+  final TextEditingController _serverPortController = TextEditingController(text: '8765');
 
   WifiInfo _wifiInfo = const WifiInfo(isWifiEnabled: false, ip: '0.0.0.0', ssid: 'Scanning...', rssi: 0);
   Timer? _wifiPollTimer;
@@ -54,7 +54,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _testConnection() async {
     final ip = _serverIpController.text.trim();
-    final port = int.tryParse(_serverPortController.text.trim()) ?? 8000;
+    final port = int.tryParse(_serverPortController.text.trim()) ?? 8765;
     if (ip.isEmpty) {
       setState(() => _pingResult = 'Please enter an IP address');
       return;
@@ -95,7 +95,7 @@ class _HomeScreenState extends State<HomeScreen> {
       await _streamService.stopBroadcast();
     } else {
       final ip = _autoDiscover ? null : _serverIpController.text.trim();
-      final port = int.tryParse(_serverPortController.text.trim()) ?? 8000;
+      final port = int.tryParse(_serverPortController.text.trim()) ?? 8765;
       await _streamService.startBroadcast(
         serverIp: ip,
         serverPort: port,
@@ -297,7 +297,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 14),
                               decoration: InputDecoration(
                                 isDense: true,
-                                hintText: '8000',
+                                hintText: '8765',
                                 hintStyle: const TextStyle(color: Colors.white24),
                                 filled: true,
                                 fillColor: Colors.white.withValues(alpha: 0.05),

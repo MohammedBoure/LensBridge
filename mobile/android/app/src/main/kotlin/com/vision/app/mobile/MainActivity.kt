@@ -36,7 +36,7 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "startBroadcast" -> {
                     val serverIp = call.argument<String>("serverIp") ?: ""
-                    val serverPort = call.argument<Int>("serverPort") ?: 8000
+                    val serverPort = call.argument<Int>("serverPort") ?: 8765
                     val autoDiscover = call.argument<Boolean>("autoDiscover") ?: true
                     val cameraMode = call.argument<String>("cameraMode") ?: "both"
 

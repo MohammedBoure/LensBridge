@@ -21,7 +21,7 @@ class DiscoveredServer {
     return DiscoveredServer(
       serverName: json['server_name'] as String? ?? 'Desktop Server',
       ip: json['ip'] as String? ?? '',
-      port: json['port'] as int? ?? 8000,
+      port: json['port'] as int? ?? 8765,
       streamEndpoint: json['stream_endpoint'] as String? ?? '',
     );
   }

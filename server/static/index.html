@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Vision • Dual-Camera Live Center</title>
+  <title>Vision Stream Proxy • Back Camera Live Center</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -21,8 +21,8 @@
           </svg>
         </div>
         <div class="brand-text">
-          <h1>VISION CORE</h1>
-          <span class="subtitle">Concurrent Dual-Camera Live Hub</span>
+          <h1>VISION PROXY</h1>
+          <span class="subtitle">Back-Camera Stream Bridge & Reverse Proxy</span>
         </div>
       </div>
 
@@ -36,113 +36,120 @@
         <div class="status-pill" id="phonePill">
           <span class="status-dot red" id="phoneDot"></span>
           <span class="label">Phone:</span>
-          <span class="value" id="phoneStatusDisplay">Waiting for Wi-Fi Link...</span>
+          <span class="value" id="phoneStatusDisplay">Waiting for Wi-Fi Stream...</span>
         </div>
         <div class="status-pill">
-          <span class="label">Auto-Discovery:</span>
-          <span class="value active-badge">UDP: 45454 Active</span>
+          <span class="label">UDP Auto-Discovery:</span>
+          <span class="value active-badge">Port 45454 Active 24/7</span>
         </div>
-      </div>
-
-      <!-- Controls -->
-      <div class="view-controls">
-        <button class="btn-mode active" data-mode="split" title="Side-by-Side Dual View">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18"/></svg>
-          Dual Split
-        </button>
-        <button class="btn-mode" data-mode="pip" title="Picture in Picture">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="13" y="13" width="6" height="6" rx="1"/></svg>
-          PiP
-        </button>
-        <button class="btn-mode" data-mode="rear-only" title="Rear Camera Fullscreen">Rear Only</button>
-        <button class="btn-mode" data-mode="front-only" title="Front Camera Fullscreen">Front Only</button>
       </div>
     </header>
 
-    <!-- Main Live Streams Grid -->
-    <main class="streams-viewport mode-split" id="viewport">
-      <!-- Rear Camera Box -->
-      <div class="camera-card" id="rearCard">
-        <div class="camera-header">
-          <div class="cam-title">
-            <span class="tag tag-rear">BACK CAM</span>
-            <span class="cam-res" id="rearResolution">-- x --</span>
+    <!-- Main Workspace: Left Video + Right Proxy Sidebar -->
+    <main class="main-layout">
+      <!-- Live Video Card -->
+      <div class="video-section">
+        <div class="camera-card">
+          <div class="camera-header">
+            <div class="cam-title">
+              <span class="tag tag-rear">BACK CAMERA FEED</span>
+              <span class="cam-res" id="resolutionText">-- x --</span>
+            </div>
+            <div class="cam-telemetry">
+              <span class="stat-badge"><span id="fpsText">0.0</span> FPS</span>
+              <span class="stat-badge"><span id="bitrateText">0</span> kbps</span>
+            </div>
           </div>
-          <div class="cam-telemetry">
-            <span class="stat-badge"><span id="rearFps">0.0</span> FPS</span>
-            <span class="stat-badge"><span id="rearBitrate">0</span> kbps</span>
-          </div>
-        </div>
 
-        <div class="canvas-container">
-          <canvas id="rearCanvas"></canvas>
-          <div class="no-stream-overlay" id="rearOverlay">
-            <div class="loader-pulse"></div>
-            <p>Waiting for Rear Camera Stream</p>
-            <span class="hint">Ensure phone app is running on same Wi-Fi</span>
+          <div class="canvas-container">
+            <canvas id="videoCanvas"></canvas>
+            <div class="no-stream-overlay" id="overlay">
+              <div class="loader-pulse"></div>
+              <p>Waiting for Phone Stream</p>
+              <span class="hint">Start broadcast on phone or tap preset IP</span>
+            </div>
           </div>
-        </div>
 
-        <div class="camera-footer">
-          <button class="btn-action" onclick="takeSnapshot('rear')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
-            Snapshot
-          </button>
-          <button class="btn-action" onclick="toggleFullscreen('rearCard')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
-            Expand
-          </button>
+          <div class="camera-footer">
+            <button class="btn-action" onclick="takeSnapshot()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+              Save Snapshot
+            </button>
+            <button class="btn-action" onclick="toggleFullscreen()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+              Fullscreen
+            </button>
+          </div>
         </div>
       </div>
 
-      <!-- Front Camera Box -->
-      <div class="camera-card" id="frontCard">
-        <div class="camera-header">
-          <div class="cam-title">
-            <span class="tag tag-front">FRONT CAM</span>
-            <span class="cam-res" id="frontResolution">-- x --</span>
+      <!-- Right Panel: Reverse / Proxy Stream Endpoints & Code -->
+      <aside class="sidebar-section">
+        <!-- Proxy Endpoints Box -->
+        <div class="sidebar-card">
+          <h3>Reverse / Proxy Stream Endpoints</h3>
+          <p class="card-desc">Use these URLs to convert and stream into other internal programs (OpenCV, VLC, AI models, custom software).</p>
+
+          <div class="endpoint-item">
+            <label>MJPEG Video Stream (OpenCV / VLC / Web):</label>
+            <div class="copy-input-group">
+              <input type="text" id="mjpegUrl" readonly>
+              <button onclick="copyToClipboard('mjpegUrl')">Copy</button>
+            </div>
           </div>
-          <div class="cam-telemetry">
-            <span class="stat-badge"><span id="frontFps">0.0</span> FPS</span>
-            <span class="stat-badge"><span id="frontBitrate">0</span> kbps</span>
+
+          <div class="endpoint-item">
+            <label>WebSocket Proxy (Raw Frames, Low-Latency):</label>
+            <div class="copy-input-group">
+              <input type="text" id="wsUrl" readonly>
+              <button onclick="copyToClipboard('wsUrl')">Copy</button>
+            </div>
+          </div>
+
+          <div class="endpoint-item">
+            <label>Single Frame REST Snapshot:</label>
+            <div class="copy-input-group">
+              <input type="text" id="snapUrl" readonly>
+              <button onclick="copyToClipboard('snapUrl')">Copy</button>
+            </div>
           </div>
         </div>
 
-        <div class="canvas-container">
-          <canvas id="frontCanvas"></canvas>
-          <div class="no-stream-overlay" id="frontOverlay">
-            <div class="loader-pulse"></div>
-            <p>Waiting for Front Camera Stream</p>
-            <span class="hint">Broadcasting concurrently with rear camera</span>
-          </div>
-        </div>
+        <!-- Integration Example Code Box -->
+        <div class="sidebar-card">
+          <h3>Connect from Another Internal Program</h3>
+          <p class="card-desc">Example: Consume the live stream in Python with OpenCV:</p>
+          <pre class="code-box"><code>import cv2
 
-        <div class="camera-footer">
-          <button class="btn-action" onclick="takeSnapshot('front')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
-            Snapshot
-          </button>
-          <button class="btn-action" onclick="toggleFullscreen('frontCard')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
-            Expand
-          </button>
+stream_url = "<span id="codeMjpegUrl">http://localhost:8765/stream/video</span>"
+cap = cv2.VideoCapture(stream_url)
+
+while True:
+    ret, frame = cap.read()
+    if ret:
+        cv2.imshow("Phone Camera Stream", frame)
+    if cv2.waitKey(1) == 27:
+        break
+
+cap.release()
+cv2.destroyAllWindows()</code></pre>
         </div>
-      </div>
+      </aside>
     </main>
 
     <!-- Footer System Status -->
     <footer class="bottom-bar">
       <div class="system-item">
-        <span class="label">Client Device:</span>
-        <span class="val" id="deviceModelText">Not Connected</span>
+        <span class="label">Phone Device:</span>
+        <span class="val" id="deviceModelText">Waiting...</span>
       </div>
       <div class="system-item">
-        <span class="label">Total Received:</span>
+        <span class="label">Received Frames:</span>
         <span class="val" id="totalFramesText">0 frames</span>
       </div>
       <div class="system-item">
-        <span class="label">Connection State:</span>
-        <span class="val highlight" id="wsStateText">Connecting to local core...</span>
+        <span class="label">Server Status:</span>
+        <span class="val highlight">Online 24/7 (Always-On Daemon)</span>
       </div>
     </footer>
   </div>
