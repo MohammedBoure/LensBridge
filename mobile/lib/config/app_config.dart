@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 /// Central application configuration parameters for Vision Cam.
 class AppConfig {
   static const String appName = 'Vision Cam';
-  static const int defaultHttpPort = 8000;
+  static const int defaultHttpPort = 8765;
   static const int discoveryPort = 45454;
   static const String discoveryProbeMessage = 'VISION_DISCOVER_PROBE';
   static const String broadcastAddress = '255.255.255.255';

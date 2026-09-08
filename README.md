@@ -92,7 +92,7 @@ py main.py
 
 - The desktop server will start its UDP Auto-Discovery beacon on port `45454`.
 - The PySide6 Desktop GUI window will appear displaying side-by-side feeds for the **Rear Camera** and **Front Camera**.
-- You can also view the stream in your browser at `http://localhost:8000`.
+- You can also view the stream in your browser at `http://localhost:8765`.
 
 ### 2. Running the Mobile Application
 

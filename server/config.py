@@ -4,7 +4,7 @@ import socket
 
 # Network configuration
 DEFAULT_HOST = "0.0.0.0"
-HTTP_PORT = 8000
+HTTP_PORT = 8765
 DISCOVERY_PORT = 45454
 BROADCAST_IP = "255.255.255.255"
 

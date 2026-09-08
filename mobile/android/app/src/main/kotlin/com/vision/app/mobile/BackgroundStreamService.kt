@@ -9,7 +9,6 @@ import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import okhttp3.*
-import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
 import java.net.DatagramPacket
@@ -21,7 +20,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Foreground Service that persists camera capture and WebSocket streaming
  * in the background even when the device is locked or the app is minimized.
- * Supports fault-tolerant single or dual-camera streaming.
+ * Supports fault-tolerant single or dual-camera streaming, multicast lock,
+ * and robust auto-discovery with emulator support.
  */
 class BackgroundStreamService : Service() {
 
@@ -42,11 +42,22 @@ class BackgroundStreamService : Service() {
             private set
 
         var eventCallback: ((String, Map<String, Any>) -> Unit)? = null
+
+        fun isEmulator(): Boolean {
+            return (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
+                    || Build.FINGERPRINT.startsWith("generic")
+                    || Build.HARDWARE.contains("goldfish")
+                    || Build.HARDWARE.contains("ranchu")
+                    || Build.MODEL.contains("google_sdk")
+                    || Build.MODEL.contains("Emulator")
+                    || Build.MODEL.contains("Android SDK built for x86")
+        }
     }
 
     private lateinit var cameraManager: DualCameraManager
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     private var okHttpClient: OkHttpClient? = null
     private var webSocket: WebSocket? = null
@@ -54,7 +65,7 @@ class BackgroundStreamService : Service() {
     private var targetServerIp: String? = null
     private var targetServerPort: Int = 8000
     private var autoDiscover: Boolean = true
-    private var cameraMode: String = "both"
+    private var cameraMode: String = "rear"
 
     private val isStreaming = AtomicBoolean(false)
     private var discoveryThread: Thread? = null
@@ -82,7 +93,8 @@ class BackgroundStreamService : Service() {
         okHttpClient = OkHttpClient.Builder()
             .readTimeout(10, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
-            .pingInterval(5, TimeUnit.SECONDS)
+            .pingInterval(3, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .build()
     }
 
@@ -90,15 +102,21 @@ class BackgroundStreamService : Service() {
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VisionCam::WakeLock").apply {
-                acquire(12 * 60 * 60 * 1000L) // 12 hours max safety
+                acquire(12 * 60 * 60 * 1000L)
             }
 
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "VisionCam::WifiLock").apply {
                 acquire()
             }
+
+            // Crucial: Android blocks incoming UDP broadcast unless MulticastLock is held!
+            multicastLock = wifiManager.createMulticastLock("VisionCam::MulticastLock").apply {
+                setReferenceCounted(true)
+                acquire()
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed acquiring WakeLock or WifiLock", e)
+            Log.e(TAG, "Failed acquiring WakeLock, WifiLock, or MulticastLock: ${e.message}")
         }
     }
 
@@ -106,26 +124,35 @@ class BackgroundStreamService : Service() {
         try {
             if (wakeLock?.isHeld == true) wakeLock?.release()
             if (wifiLock?.isHeld == true) wifiLock?.release()
+            if (multicastLock?.isHeld == true) multicastLock?.release()
         } catch (e: Exception) {
-            Log.e(TAG, "Error releasing locks", e)
+            Log.e(TAG, "Error releasing locks: ${e.message}")
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                targetServerIp = intent.getStringExtra(EXTRA_SERVER_IP)
+                targetServerIp = intent.getStringExtra(EXTRA_SERVER_IP)?.trim()
                 targetServerPort = intent.getIntExtra(EXTRA_SERVER_PORT, 8000)
                 autoDiscover = intent.getBooleanExtra(EXTRA_AUTO_DISCOVER, true)
-                cameraMode = intent.getStringExtra(EXTRA_CAMERA_MODE) ?: "both"
+                cameraMode = intent.getStringExtra(EXTRA_CAMERA_MODE) ?: "rear"
 
                 startForegroundNotification()
                 isServiceRunning = true
 
-                if (autoDiscover && (targetServerIp == null || targetServerIp!!.isEmpty())) {
+                // Priority: If user explicitly provided an IP, connect immediately!
+                if (!targetServerIp.isNullOrEmpty() && targetServerIp != "0.0.0.0") {
+                    Log.d(TAG, "Connecting directly to user specified Server IP: $targetServerIp:$targetServerPort")
+                    connectWebSocket(targetServerIp!!, targetServerPort)
+                } else if (isEmulator()) {
+                    // Android emulator host machine loopback is 10.0.2.2
+                    Log.d(TAG, "Running in Android Emulator. Connecting directly to host PC at 10.0.2.2:$targetServerPort")
+                    connectWebSocket("10.0.2.2", targetServerPort)
+                } else if (autoDiscover) {
                     startAutoDiscovery()
                 } else {
-                    targetServerIp?.let { connectWebSocket(it, targetServerPort) }
+                    notifyEvent("ERROR", mapOf("error" to "No Server IP specified"))
                 }
             }
             ACTION_STOP -> {
@@ -188,26 +215,36 @@ class BackgroundStreamService : Service() {
                 }
 
                 val probeMsg = "VISION_DISCOVER_PROBE".toByteArray()
-                val probePacket = DatagramPacket(
-                    probeMsg,
-                    probeMsg.size,
-                    InetAddress.getByName("255.255.255.255"),
-                    45454
+                val broadcastAddresses = mutableListOf(
+                    InetAddress.getByName("255.255.255.255")
                 )
+
+                if (isEmulator()) {
+                    broadcastAddresses.add(InetAddress.getByName("10.0.2.2"))
+                }
 
                 val buffer = ByteArray(1024)
                 val responsePacket = DatagramPacket(buffer, buffer.size)
 
                 while (isServiceRunning && !isStreaming.get()) {
                     try {
-                        socket.send(probePacket)
-                        socket.receive(responsePacket)
+                        for (addr in broadcastAddresses) {
+                            val probePacket = DatagramPacket(probeMsg, probeMsg.size, addr, 45454)
+                            socket.send(probePacket)
+                        }
 
+                        socket.receive(responsePacket)
                         val respJson = String(responsePacket.data, 0, responsePacket.length)
                         val json = JSONObject(respJson)
+
                         if (json.optString("type") == "VISION_SERVER_ANNOUNCE") {
-                            val ip = json.optString("ip", responsePacket.address.hostAddress)
+                            var ip = json.optString("ip", responsePacket.address.hostAddress)
                             val port = json.optInt("port", 8000)
+
+                            if (isEmulator() && (ip == "127.0.0.1" || ip.startsWith("192.168."))) {
+                                ip = "10.0.2.2"
+                            }
+
                             Log.d(TAG, "Discovered Vision Server at $ip:$port")
                             connectWebSocket(ip, port)
                             break
@@ -217,7 +254,7 @@ class BackgroundStreamService : Service() {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Discovery error", e)
+                Log.e(TAG, "Discovery error: ${e.message}", e)
             } finally {
                 socket?.close()
             }
@@ -228,12 +265,13 @@ class BackgroundStreamService : Service() {
         val model = "${Build.MANUFACTURER} ${Build.MODEL}"
         val url = "ws://$ip:$port/ws/phone?device=${java.net.URLEncoder.encode(model, "UTF-8")}"
 
-        notifyEvent("CONNECTING", mapOf("serverIp" to ip, "port" to port))
+        notifyEvent("CONNECTING", mapOf("serverIp" to ip, "port" to port, "status" to "Connecting to $ip:$port..."))
+        Log.d(TAG, "Attempting WebSocket connection to: $url")
 
         val request = Request.Builder().url(url).build()
         webSocket = okHttpClient?.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WebSocket connected to $ip:$port")
+                Log.d(TAG, "WebSocket connected successfully to $ip:$port")
                 isStreaming.set(true)
                 notifyEvent("STREAMING", mapOf("serverIp" to ip, "status" to "Connected"))
 
@@ -268,10 +306,8 @@ class BackgroundStreamService : Service() {
                                 frontMessage = message
                             }
 
-                            // Send state update to server
                             sendCameraStatusToServer()
 
-                            // Notify Flutter UI
                             notifyEvent("CAMERA_STATUS", mapOf(
                                 "rearActive" to isRearActive,
                                 "rearMessage" to rearMessage,
@@ -284,20 +320,31 @@ class BackgroundStreamService : Service() {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket failure: ${t.message}")
+                val errorMsg = t.localizedMessage ?: t.message ?: "Connection failed"
+                Log.e(TAG, "WebSocket connection failed to $ip:$port: $errorMsg", t)
                 isStreaming.set(false)
                 cameraManager.stopStreaming()
-                notifyEvent("DISCONNECTED", mapOf("error" to (t.message ?: "Connection error")))
 
-                // Auto-reconnect if running
+                notifyEvent("DISCONNECTED", mapOf(
+                    "error" to errorMsg,
+                    "serverIp" to ip,
+                    "port" to port,
+                    "reason" to "Cannot reach $ip:$port ($errorMsg)"
+                ))
+
+                // Auto-reconnect after 3 seconds if still running
                 if (isServiceRunning) {
-                    Thread.sleep(3000)
-                    if (isServiceRunning) connectWebSocket(ip, port)
+                    try {
+                        Thread.sleep(3000)
+                    } catch (_: InterruptedException) {}
+                    if (isServiceRunning) {
+                        connectWebSocket(ip, port)
+                    }
                 }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "WebSocket closed: $reason")
+                Log.d(TAG, "WebSocket closed ($code): $reason")
                 isStreaming.set(false)
                 cameraManager.stopStreaming()
                 notifyEvent("DISCONNECTED", mapOf("reason" to reason))
@@ -354,7 +401,7 @@ class BackgroundStreamService : Service() {
         try {
             webSocket?.close(1000, "User stopped stream")
         } catch (e: Exception) {
-            Log.e(TAG, "Error closing websocket", e)
+            Log.e(TAG, "Error closing websocket: ${e.message}")
         }
         webSocket = null
         notifyEvent("STOPPED", mapOf("status" to "Broadcast stopped"))
