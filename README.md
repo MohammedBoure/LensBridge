@@ -128,7 +128,17 @@ cap.release()
 cv2.destroyAllWindows()
 ```
 
-### 3. Launch the Phone Application
+### 3. Running as a 24/7 Windows Background Service
+
+To run the server continuously in the background without keeping any console windows open (starts automatically on Windows boot):
+
+1. **Install Service**: Double-click [`server/install_service.bat`](file:///C:/Users/moham/Desktop/vision/server/install_service.bat)
+2. **Check Status**: Double-click [`server/status_service.bat`](file:///C:/Users/moham/Desktop/vision/server/status_service.bat)
+3. **Stop Service**: Double-click [`server/stop_service.bat`](file:///C:/Users/moham/Desktop/vision/server/stop_service.bat)
+4. **Start Service**: Double-click [`server/start_service.bat`](file:///C:/Users/moham/Desktop/vision/server/start_service.bat)
+5. **Uninstall Service**: Double-click [`server/uninstall_service.bat`](file:///C:/Users/moham/Desktop/vision/server/uninstall_service.bat)
+
+### 4. Launch the Phone Application
 
 Install the release APK located at:
 `mobile/build/app/outputs/flutter-apk/app-release.apk`

@@ -20,8 +20,16 @@ This directory contains the desktop backend program, UDP auto-discovery responde
 - **`app.py`**: FastAPI server exposing proxy endpoints (`/stream/video`, `/video_feed`, `/ws/proxy`, `/snapshot`, `/api/status`) and ingestion endpoint (`/ws/phone`).
 - **`desktop_gui.py`**: Native Windows PySide6 desktop GUI displaying live back camera video feed, copyable proxy stream URLs, snapshot tools, and sample OpenCV integration code.
 - **`main.py`**: Orchestrator launching UDP discovery, Uvicorn backend, and desktop GUI in unison.
+- **`service_main.py`**: Headless background service daemon for 24/7 invisible execution with rotating file logging (`service.log`).
+- **`service_manager.ps1`**: PowerShell service automation script handling `install`, `uninstall`, `start`, `stop`, `restart`, and `status`.
+- **`run_hidden.vbs`**: Windows Script Host runner launching the server in 100% invisible mode (no console window).
+- **`install_service.bat`**: 1-click Windows service installer (registers auto-start on boot/logon).
+- **`uninstall_service.bat`**: 1-click Windows service uninstaller.
+- **`start_service.bat`**: 1-click background service starter.
+- **`stop_service.bat`**: 1-click background service stopper.
+- **`status_service.bat`**: 1-click background service telemetry & endpoint inspector.
 - **`requirements.txt`**: Python dependencies (`fastapi`, `uvicorn`, `PySide6`, `websocket-client`, `Pillow`).
-- **`run_server.bat`**: Double-clickable Windows batch launcher.
+- **`run_server.bat`**: Double-clickable Windows batch launcher for interactive desktop GUI mode.
 - **`static/`**: Web-based live dashboard assets (`index.html`, `style.css`, `app.js`).
 
 ## Internal Program Integration Example (Python OpenCV)
