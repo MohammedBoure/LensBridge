@@ -8,8 +8,10 @@ A cross-platform Flutter application built to capture and broadcast the phone's 
 - **Remote Flash / Torch Control**: Instantaneous flashlight toggling commanded from the server or internal API with zero stream disruption and minimum battery consumption.
 - **Microphone Audio Streaming**: Energy-efficient background audio capture streaming 16-bit Mono PCM at 16,000 Hz with negligible CPU load and remote mute/enable controls.
 - **Dynamic Quality & FPS Throttling**: Server-controlled hardware JPEG compression (10-100%) and native frame throttling (1-60 FPS) to drastically conserve battery and Wi-Fi transmission energy.
-- **Background Execution**: Runs as an Android Foreground Service with continuous capture, `WakeLock`, `WifiLock`, and multicast lock so transmission never terminates when the screen turns off.
-- **Automatic Wi-Fi Discovery**: Listens for and sends UDP broadcast probes on port `45454` to automatically discover and connect to the local Vision Desktop Server without needing manual IP configuration.
+- **Background Execution & 24/7 Persistence**: Runs as an Android Foreground Service (`camera|dataSync|microphone`) holding `WakeLock` and adaptive `WifiLock`. Survives task swiping via `AlarmManager` resurrection and boots automatically upon device restart (`BOOT_COMPLETED`).
+- **Zero-Energy Standby & Opportunistic Reconnection**: Sensors (Camera2 and AudioRecord) and high-perf Wi-Fi locks are completely shut down when disconnected, drawing near-zero idle power. Uses `ConnectivityManager.NetworkCallback` and IP caching to reconnect automatically and instantly (<50ms) whenever Wi-Fi associates.
+- **Battery Optimization Whitelist**: One-tap whitelist bypasses Android Doze mode and OS battery killers for uninterrupted 24/7 background streaming.
+- **Automatic Wi-Fi Discovery**: Adaptive UDP broadcast (8 fast bursts on network changes, 12s sleep intervals in standby) to find the server with minimal battery impact.
 
 ## Directory Structure
 

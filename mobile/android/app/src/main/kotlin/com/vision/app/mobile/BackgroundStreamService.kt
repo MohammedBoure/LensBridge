@@ -3,7 +3,12 @@ package com.vision.app.mobile
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.*
 import android.util.Log
@@ -18,10 +23,16 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Foreground Service that persists camera capture and WebSocket streaming
- * in the background even when the device is locked or the app is minimized.
- * Supports fault-tolerant single or dual-camera streaming, multicast lock,
- * and robust auto-discovery with emulator support.
+ * Energy-efficient and resilient Foreground Service that persists camera capture
+ * and WebSocket streaming 24/7 in the background.
+ *
+ * Designed for minimum energy consumption and maximum opportunistic connectivity:
+ * - Sensors (Camera & Microphone) are completely powered down when disconnected.
+ * - High-performance Wi-Fi lock is only held during active streaming; released during standby.
+ * - Adaptive Auto-Discovery: fast burst on network events, low-power sleep when server is offline.
+ * - Listens to Android NetworkCallbacks for instant reconnection whenever Wi-Fi associates.
+ * - Remembers last known server coordinates for <50ms instant reconnection.
+ * - Survives device reboots (BootReceiver) and task swiping (onTaskRemoved + AlarmManager).
  */
 class BackgroundStreamService : Service() {
 
@@ -37,6 +48,12 @@ class BackgroundStreamService : Service() {
         const val EXTRA_SERVER_PORT = "extra_server_port"
         const val EXTRA_AUTO_DISCOVER = "extra_auto_discover"
         const val EXTRA_CAMERA_MODE = "extra_camera_mode"
+
+        const val PREFS_NAME = "VisionCamPrefs"
+        const val KEY_LAST_SERVER_IP = "last_server_ip"
+        const val KEY_LAST_SERVER_PORT = "last_server_port"
+        const val KEY_LAST_AUTO_DISCOVER = "last_auto_discover"
+        const val KEY_LAST_CAMERA_MODE = "last_camera_mode"
 
         // Wire protocol prefix byte codes
         const val CODE_REAR_FRAME: Byte = 0x00
@@ -76,6 +93,14 @@ class BackgroundStreamService : Service() {
     private val isStreaming = AtomicBoolean(false)
     private var discoveryThread: Thread? = null
 
+    // Adaptive Discovery synchronization
+    private val discoveryLock = java.lang.Object()
+    private var discoveryBurstCount = 8
+
+    // Network Connectivity monitoring
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     // Camera availability tracking
     private var isRearActive = false
     private var isFrontActive = false
@@ -92,8 +117,9 @@ class BackgroundStreamService : Service() {
         cameraManager = DualCameraManager(this)
         audioManager = AudioStreamManager(this)
         createNotificationChannel()
-        acquireLocks()
+        acquireStandbyLocks()
         initHttpClient()
+        registerNetworkObserver()
     }
 
     private fun initHttpClient() {
@@ -105,36 +131,92 @@ class BackgroundStreamService : Service() {
             .build()
     }
 
-    private fun acquireLocks() {
+    private fun acquireStandbyLocks() {
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VisionCam::WakeLock").apply {
-                acquire(12 * 60 * 60 * 1000L)
+                acquire(24 * 60 * 60 * 1000L)
             }
 
+            // Android requires MulticastLock to receive UDP discovery broadcasts
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "VisionCam::WifiLock").apply {
-                acquire()
-            }
-
-            // Crucial: Android blocks incoming UDP broadcast unless MulticastLock is held!
             multicastLock = wifiManager.createMulticastLock("VisionCam::MulticastLock").apply {
                 setReferenceCounted(true)
                 acquire()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed acquiring WakeLock, WifiLock, or MulticastLock: ${e.message}")
+            Log.e(TAG, "Failed acquiring WakeLock or MulticastLock: ${e.message}")
+        }
+    }
+
+    private fun acquireStreamingWifiLock() {
+        try {
+            if (wifiLock == null || wifiLock?.isHeld != true) {
+                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "VisionCam::StreamingWifiLock").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+                Log.d(TAG, "Acquired High-Performance WifiLock for active streaming.")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to acquire High-Perf WifiLock: ${e.message}")
+        }
+    }
+
+    private fun releaseStreamingWifiLock() {
+        try {
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+                Log.d(TAG, "Released High-Performance WifiLock to save standby battery.")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing WifiLock: ${e.message}")
         }
     }
 
     private fun releaseLocks() {
         try {
+            releaseStreamingWifiLock()
             if (wakeLock?.isHeld == true) wakeLock?.release()
-            if (wifiLock?.isHeld == true) wifiLock?.release()
             if (multicastLock?.isHeld == true) multicastLock?.release()
         } catch (e: Exception) {
             Log.e(TAG, "Error releasing locks: ${e.message}")
         }
+    }
+
+    private fun registerNetworkObserver() {
+        try {
+            connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+
+            networkCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    Log.i(TAG, "Wi-Fi network detected! Triggering opportunistic reconnection...")
+                    if (isServiceRunning && !isStreaming.get()) {
+                        triggerOpportunisticReconnect()
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    Log.w(TAG, "Wi-Fi network connection lost.")
+                }
+            }
+            connectivityManager?.registerNetworkCallback(request, networkCallback!!)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not register NetworkCallback: ${e.message}")
+        }
+    }
+
+    private fun unregisterNetworkObserver() {
+        try {
+            networkCallback?.let { connectivityManager?.unregisterNetworkCallback(it) }
+        } catch (_: Exception) {}
+        networkCallback = null
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -145,21 +227,33 @@ class BackgroundStreamService : Service() {
                 autoDiscover = intent.getBooleanExtra(EXTRA_AUTO_DISCOVER, true)
                 cameraMode = intent.getStringExtra(EXTRA_CAMERA_MODE) ?: "rear"
 
+                // Save parameters for boot and auto-reconnect resilience
+                savePreferences(targetServerIp ?: "", targetServerPort, autoDiscover, cameraMode)
+
                 startForegroundNotification()
                 isServiceRunning = true
 
-                // Priority: If user explicitly provided an IP, connect immediately!
+                // Priority 1: User explicitly provided an IP
                 if (!targetServerIp.isNullOrEmpty() && targetServerIp != "0.0.0.0") {
-                    Log.d(TAG, "Connecting directly to user specified Server IP: $targetServerIp:$targetServerPort")
+                    Log.d(TAG, "Connecting to user specified Server IP: $targetServerIp:$targetServerPort")
                     connectWebSocket(targetServerIp!!, targetServerPort)
                 } else if (isEmulator()) {
-                    // Android emulator host machine loopback is 10.0.2.2
-                    Log.d(TAG, "Running in Android Emulator. Connecting directly to host PC at 10.0.2.2:$targetServerPort")
+                    Log.d(TAG, "Connecting directly to emulator host at 10.0.2.2:$targetServerPort")
                     connectWebSocket("10.0.2.2", targetServerPort)
-                } else if (autoDiscover) {
-                    startAutoDiscovery()
                 } else {
-                    notifyEvent("ERROR", mapOf("error" to "No Server IP specified"))
+                    // Priority 2: Opportunistic fast connect to last known IP in cache
+                    val cachedIp = loadSavedServerIp()
+                    if (!cachedIp.isNullOrEmpty()) {
+                        Log.d(TAG, "Attempting opportunistic instant connect to cached Server IP: $cachedIp:$targetServerPort")
+                        connectWebSocket(cachedIp, targetServerPort)
+                    }
+
+                    // Priority 3: Start adaptive auto-discovery if needed
+                    if (autoDiscover) {
+                        startAdaptiveAutoDiscovery()
+                    } else if (cachedIp.isNullOrEmpty()) {
+                        notifyEvent("ERROR", mapOf("error" to "No Server IP specified"))
+                    }
                 }
             }
             ACTION_STOP -> {
@@ -168,6 +262,42 @@ class BackgroundStreamService : Service() {
             }
         }
         return START_STICKY
+    }
+
+    private fun triggerOpportunisticReconnect() {
+        val cachedIp = if (!targetServerIp.isNullOrEmpty() && targetServerIp != "0.0.0.0") targetServerIp else loadSavedServerIp()
+        if (!cachedIp.isNullOrEmpty()) {
+            connectWebSocket(cachedIp, targetServerPort)
+        }
+        wakeDiscoveryBurst()
+    }
+
+    private fun wakeDiscoveryBurst() {
+        synchronized(discoveryLock) {
+            discoveryBurstCount = 8
+            discoveryLock.notifyAll()
+        }
+    }
+
+    private fun savePreferences(ip: String, port: Int, auto: Boolean, mode: String) {
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                if (ip.isNotEmpty() && ip != "0.0.0.0") {
+                    putString(KEY_LAST_SERVER_IP, ip)
+                }
+                putInt(KEY_LAST_SERVER_PORT, port)
+                putBoolean(KEY_LAST_AUTO_DISCOVER, auto)
+                putString(KEY_LAST_CAMERA_MODE, mode)
+                apply()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun loadSavedServerIp(): String? {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val ip = prefs.getString(KEY_LAST_SERVER_IP, "") ?: ""
+        return if (ip.isNotEmpty() && ip != "0.0.0.0") ip else null
     }
 
     private fun startForegroundNotification() {
@@ -213,8 +343,19 @@ class BackgroundStreamService : Service() {
         }
     }
 
-    private fun startAutoDiscovery() {
-        notifyEvent("DISCOVERING", mapOf("status" to "Scanning Wi-Fi for Desktop Server..."))
+    /**
+     * Adaptive auto-discovery:
+     * - Runs 8 fast discovery pulses (1.5s interval) on startup / network change.
+     * - Drops to 12s standby interval when server is offline to conserve maximum battery.
+     * - Wakes up instantly on network connectivity changes via wakeDiscoveryBurst().
+     */
+    private fun startAdaptiveAutoDiscovery() {
+        if (discoveryThread?.isAlive == true) {
+            wakeDiscoveryBurst()
+            return
+        }
+
+        notifyEvent("DISCOVERING", mapOf("status" to "Searching Wi-Fi for Desktop Server..."))
 
         discoveryThread = Thread {
             var socket: DatagramSocket? = null
@@ -248,30 +389,54 @@ class BackgroundStreamService : Service() {
                         val json = JSONObject(respJson)
 
                         if (json.optString("type") == "VISION_SERVER_ANNOUNCE") {
-                            var ip = json.optString("ip", responsePacket.address.hostAddress)
+                            var ip = json.optString("ip", responsePacket.address.hostAddress ?: "")
                             val port = json.optInt("port", 8765)
 
                             if (isEmulator() && (ip == "127.0.0.1" || ip.startsWith("192.168."))) {
                                 ip = "10.0.2.2"
                             }
 
-                            Log.d(TAG, "Discovered Vision Server at $ip:$port")
+                            Log.i(TAG, "Discovered Vision Server at $ip:$port! Connecting...")
+                            savePreferences(ip, port, autoDiscover, cameraMode)
                             connectWebSocket(ip, port)
                             break
                         }
-                    } catch (e: Exception) {
-                        Thread.sleep(1500)
+                    } catch (_: Exception) {
+                        // Timeout on packet receive is normal during scanning
+                    }
+
+                    // Adaptive sleep: burst vs low-power standby
+                    val sleepDuration = synchronized(discoveryLock) {
+                        if (discoveryBurstCount > 0) {
+                            discoveryBurstCount--
+                            1500L
+                        } else {
+                            12000L // Deep standby: sleep 12s so radio and CPU can enter low-power C-states
+                        }
+                    }
+
+                    try {
+                        synchronized(discoveryLock) {
+                            discoveryLock.wait(sleepDuration)
+                        }
+                    } catch (_: InterruptedException) {
+                        break
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Discovery error: ${e.message}", e)
+                Log.e(TAG, "Discovery socket error: ${e.message}")
             } finally {
                 socket?.close()
             }
-        }.apply { start() }
+        }.apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun connectWebSocket(ip: String, port: Int) {
+        if (isStreaming.get()) return
+
         val model = "${Build.MANUFACTURER} ${Build.MODEL}"
         val url = "ws://$ip:$port/ws/phone?device=${java.net.URLEncoder.encode(model, "UTF-8")}"
 
@@ -281,11 +446,14 @@ class BackgroundStreamService : Service() {
         val request = Request.Builder().url(url).build()
         webSocket = okHttpClient?.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WebSocket connected successfully to $ip:$port")
+                Log.i(TAG, "WebSocket connected successfully to $ip:$port!")
                 isStreaming.set(true)
+                savePreferences(ip, port, autoDiscover, cameraMode)
+                acquireStreamingWifiLock()
+
                 notifyEvent("STREAMING", mapOf("serverIp" to ip, "status" to "Connected"))
 
-                // Start hardware camera capture with fault-tolerant error listener
+                // Start hardware camera capture only after socket is open
                 cameraManager.startStreaming(
                     cameraMode = cameraMode,
                     targetWidth = 640,
@@ -301,7 +469,6 @@ class BackgroundStreamService : Service() {
 
                             webSocket.send(packet.toByteString(0, packet.size))
 
-                            // Update FPS metrics
                             if (cameraCode == DualCameraManager.CAMERA_REAR) rearFramesCount++ else frontFramesCount++
                             trackTelemetry()
                         }
@@ -384,10 +551,13 @@ class BackgroundStreamService : Service() {
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 val errorMsg = t.localizedMessage ?: t.message ?: "Connection failed"
-                Log.e(TAG, "WebSocket connection failed to $ip:$port: $errorMsg", t)
+                Log.w(TAG, "WebSocket connection failed to $ip:$port: $errorMsg")
                 isStreaming.set(false)
+
+                // Shut down sensors and release high-perf lock to save battery
                 cameraManager.stopStreaming()
                 audioManager.stopStreaming()
+                releaseStreamingWifiLock()
 
                 notifyEvent("DISCONNECTED", mapOf(
                     "error" to errorMsg,
@@ -396,13 +566,17 @@ class BackgroundStreamService : Service() {
                     "reason" to "Cannot reach $ip:$port ($errorMsg)"
                 ))
 
-                // Auto-reconnect after 3 seconds if still running
+                // Opportunistic reconnect retry
                 if (isServiceRunning) {
                     try {
                         Thread.sleep(3000)
                     } catch (_: InterruptedException) {}
                     if (isServiceRunning) {
-                        connectWebSocket(ip, port)
+                        if (autoDiscover) {
+                            startAdaptiveAutoDiscovery()
+                        } else {
+                            connectWebSocket(ip, port)
+                        }
                     }
                 }
             }
@@ -412,7 +586,12 @@ class BackgroundStreamService : Service() {
                 isStreaming.set(false)
                 cameraManager.stopStreaming()
                 audioManager.stopStreaming()
+                releaseStreamingWifiLock()
                 notifyEvent("DISCONNECTED", mapOf("reason" to reason))
+
+                if (isServiceRunning && autoDiscover) {
+                    startAdaptiveAutoDiscovery()
+                }
             }
         })
     }
@@ -499,6 +678,8 @@ class BackgroundStreamService : Service() {
 
         cameraManager.stopStreaming()
         audioManager.stopStreaming()
+        releaseStreamingWifiLock()
+
         try {
             webSocket?.close(1000, "User stopped stream")
         } catch (e: Exception) {
@@ -508,9 +689,44 @@ class BackgroundStreamService : Service() {
         notifyEvent("STOPPED", mapOf("status" to "Broadcast stopped"))
     }
 
+    /**
+     * Self-healing resurrection: If the app task is removed from the recent apps screen,
+     * schedule an immediate restart via AlarmManager to ensure 24/7 background persistence.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.i(TAG, "Task removed from Recents. Triggering persistent resurrection...")
+        if (isServiceRunning) {
+            try {
+                val restartIntent = Intent(applicationContext, BackgroundStreamService::class.java).apply {
+                    action = ACTION_START
+                    putExtra(EXTRA_SERVER_IP, targetServerIp ?: "")
+                    putExtra(EXTRA_SERVER_PORT, targetServerPort)
+                    putExtra(EXTRA_AUTO_DISCOVER, autoDiscover)
+                    putExtra(EXTRA_CAMERA_MODE, cameraMode)
+                }
+                val pendingIntent = PendingIntent.getService(
+                    applicationContext,
+                    101,
+                    restartIntent,
+                    PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+                )
+                val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                alarmManager.set(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    SystemClock.elapsedRealtime() + 1000,
+                    pendingIntent
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed scheduling service resurrection: ${e.message}")
+            }
+        }
+    }
+
     override fun onDestroy() {
         stopStream()
         releaseLocks()
+        unregisterNetworkObserver()
         super.onDestroy()
     }
 

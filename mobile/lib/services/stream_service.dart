@@ -211,6 +211,42 @@ class StreamService extends ChangeNotifier {
     }
   }
 
+  Future<bool> isIgnoringBatteryOptimizations() async {
+    try {
+      final res = await _methodChannel.invokeMethod<bool>('isIgnoringBatteryOptimizations');
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> requestIgnoreBatteryOptimizations() async {
+    try {
+      final res = await _methodChannel.invokeMethod<bool>('requestIgnoreBatteryOptimizations');
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> isAutoStartEnabled() async {
+    try {
+      final res = await _methodChannel.invokeMethod<bool>('isAutoStartEnabled');
+      return res ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<bool> setAutoStartEnabled(bool enabled) async {
+    try {
+      final res = await _methodChannel.invokeMethod<bool>('setAutoStartEnabled', {'enabled': enabled});
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   @override
   void dispose() {
     _eventSubscription?.cancel();

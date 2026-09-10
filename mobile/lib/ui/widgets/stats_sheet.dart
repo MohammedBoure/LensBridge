@@ -1,15 +1,19 @@
 import 'package:flutter/material.dart';
 import '../../config/app_config.dart';
 
-/// Modal bottom sheet for network settings, camera selection, and fault-tolerant configuration.
+/// Modal bottom sheet for network settings, camera selection, and 24/7 background power management.
 class StatsSheet extends StatelessWidget {
   final bool isConcurrentSupported;
   final String activeServerIp;
   final TextEditingController manualIpController;
   final bool autoDiscover;
   final String cameraMode;
+  final bool autoStartOnBoot;
+  final bool isBatteryOptimizationIgnored;
   final ValueChanged<bool> onAutoDiscoverChanged;
   final ValueChanged<String> onCameraModeChanged;
+  final ValueChanged<bool> onAutoStartChanged;
+  final VoidCallback onRequestIgnoreBatteryOptimization;
   final VoidCallback onSaveSettings;
 
   const StatsSheet({
@@ -19,8 +23,12 @@ class StatsSheet extends StatelessWidget {
     required this.manualIpController,
     required this.autoDiscover,
     required this.cameraMode,
+    required this.autoStartOnBoot,
+    required this.isBatteryOptimizationIgnored,
     required this.onAutoDiscoverChanged,
     required this.onCameraModeChanged,
+    required this.onAutoStartChanged,
+    required this.onRequestIgnoreBatteryOptimization,
     required this.onSaveSettings,
   });
 
@@ -130,6 +138,78 @@ class StatsSheet extends StatelessWidget {
                               : 'If a camera fails or is broken, the app runs safely on the working sensor.',
                           style: const TextStyle(fontSize: 11, color: AppConfig.textDim),
                         ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 16),
+
+            // 24/7 Background Persistence & Battery Management
+            const Text(
+              '24/7 Background & Power Saving',
+              style: TextStyle(color: AppConfig.textDim, fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.04),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              ),
+              child: Column(
+                children: [
+                  SwitchListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                    title: const Text('Auto-Start on Boot (24/7 Run)', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
+                    subtitle: const Text('Resumes broadcasting automatically when phone restarts or boots', style: TextStyle(color: AppConfig.textDim, fontSize: 11)),
+                    value: autoStartOnBoot,
+                    activeThumbColor: AppConfig.primaryCyan,
+                    onChanged: onAutoStartChanged,
+                  ),
+                  const Divider(height: 1, color: Colors.white12),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    child: Row(
+                      children: [
+                        Icon(
+                          isBatteryOptimizationIgnored ? Icons.battery_charging_full : Icons.battery_alert_outlined,
+                          color: isBatteryOptimizationIgnored ? AppConfig.accentGreen : Colors.amber,
+                          size: 22,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                isBatteryOptimizationIgnored ? 'Zero-Kill Battery (Unrestricted)' : 'Battery Optimization Active',
+                                style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
+                              ),
+                              Text(
+                                isBatteryOptimizationIgnored
+                                    ? 'Whitelisted: Android Doze will never suspend 24/7 stream.'
+                                    : 'Android may throttle background Wi-Fi when phone sleeps.',
+                                style: const TextStyle(color: AppConfig.textDim, fontSize: 11),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (!isBatteryOptimizationIgnored)
+                          ElevatedButton(
+                            onPressed: onRequestIgnoreBatteryOptimization,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.amber.withValues(alpha: 0.2),
+                              foregroundColor: Colors.amber,
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              visualDensity: VisualDensity.compact,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            child: const Text('Allow 24/7', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                          ),
                       ],
                     ),
                   ),

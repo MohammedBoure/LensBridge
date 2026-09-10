@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -59,6 +60,35 @@ class MainActivity : FlutterActivity() {
                 }
                 "requestPermissions" -> {
                     requestAppPermissions()
+                    result.success(true)
+                }
+                "isIgnoringBatteryOptimizations" -> {
+                    val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                    result.success(pm.isIgnoringBatteryOptimizations(packageName))
+                }
+                "requestIgnoreBatteryOptimizations" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        try {
+                            val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                data = android.net.Uri.parse("package:$packageName")
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
+                    } else {
+                        result.success(true)
+                    }
+                }
+                "isAutoStartEnabled" -> {
+                    val prefs = getSharedPreferences("VisionCamPrefs", Context.MODE_PRIVATE)
+                    result.success(prefs.getBoolean("auto_start_on_boot", true))
+                }
+                "setAutoStartEnabled" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: true
+                    val prefs = getSharedPreferences("VisionCamPrefs", Context.MODE_PRIVATE)
+                    prefs.edit().putBoolean("auto_start_on_boot", enabled).apply()
                     result.success(true)
                 }
                 else -> result.notImplemented()

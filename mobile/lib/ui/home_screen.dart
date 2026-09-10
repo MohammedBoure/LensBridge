@@ -18,7 +18,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final StreamService _streamService = StreamService();
   final TextEditingController _serverIpController = TextEditingController(text: '192.168.1.150');
   final TextEditingController _serverPortController = TextEditingController(text: '8765');
@@ -27,16 +27,39 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? _wifiPollTimer;
   bool _autoDiscover = false; // Default to manual/prefilled IP for rock-solid connection
   String _selectedCameraMode = 'rear'; // Default to 'rear' since user's front camera is broken!
+  bool _autoStartOnBoot = true;
+  bool _isBatteryOptimizationIgnored = false;
   String? _pingResult;
   bool _isPinging = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _streamService.addListener(_onStreamStateChanged);
     _streamService.setCameraMode(_selectedCameraMode);
     _refreshWifi();
+    _refreshBatteryAndAutoStart();
     _wifiPollTimer = Timer.periodic(const Duration(seconds: 4), (_) => _refreshWifi());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshBatteryAndAutoStart();
+      _refreshWifi();
+    }
+  }
+
+  Future<void> _refreshBatteryAndAutoStart() async {
+    final autoStart = await _streamService.isAutoStartEnabled();
+    final ignored = await _streamService.isIgnoringBatteryOptimizations();
+    if (mounted) {
+      setState(() {
+        _autoStartOnBoot = autoStart;
+        _isBatteryOptimizationIgnored = ignored;
+      });
+    }
   }
 
   void _onStreamStateChanged() {
@@ -119,6 +142,8 @@ class _HomeScreenState extends State<HomeScreen> {
           manualIpController: _serverIpController,
           autoDiscover: _autoDiscover,
           cameraMode: _selectedCameraMode,
+          autoStartOnBoot: _autoStartOnBoot,
+          isBatteryOptimizationIgnored: _isBatteryOptimizationIgnored,
           onAutoDiscoverChanged: (val) {
             setModalState(() => _autoDiscover = val);
             setState(() => _autoDiscover = val);
@@ -129,6 +154,18 @@ class _HomeScreenState extends State<HomeScreen> {
               _selectedCameraMode = val;
               _streamService.setCameraMode(val);
             });
+          },
+          onAutoStartChanged: (val) async {
+            setModalState(() => _autoStartOnBoot = val);
+            setState(() => _autoStartOnBoot = val);
+            await _streamService.setAutoStartEnabled(val);
+          },
+          onRequestIgnoreBatteryOptimization: () async {
+            await _streamService.requestIgnoreBatteryOptimizations();
+            await Future.delayed(const Duration(milliseconds: 1000));
+            final ignored = await _streamService.isIgnoringBatteryOptimizations();
+            setModalState(() => _isBatteryOptimizationIgnored = ignored);
+            setState(() => _isBatteryOptimizationIgnored = ignored);
           },
           onSaveSettings: () {
             Navigator.pop(context);
@@ -143,6 +180,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _wifiPollTimer?.cancel();
     _streamService.removeListener(_onStreamStateChanged);
     _streamService.dispose();
@@ -212,6 +250,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     dotColor: isStreaming
                         ? AppConfig.accentGreen
                         : (isBroadcasting ? Colors.orange : AppConfig.accentRed),
+                  ),
+                  StatusBadge(
+                    label: '24/7 Run',
+                    value: _isBatteryOptimizationIgnored ? 'Unrestricted' : 'Standard',
+                    dotColor: _isBatteryOptimizationIgnored ? AppConfig.accentGreen : Colors.amber,
+                    icon: Icons.battery_charging_full,
                   ),
                 ],
               ),
