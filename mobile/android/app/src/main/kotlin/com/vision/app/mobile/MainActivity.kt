@@ -91,6 +91,19 @@ class MainActivity : FlutterActivity() {
                     prefs.edit().putBoolean("auto_start_on_boot", enabled).apply()
                     result.success(true)
                 }
+                "getLastServerConfig" -> {
+                    val prefs = getSharedPreferences("VisionCamPrefs", Context.MODE_PRIVATE)
+                    val ip = prefs.getString("last_server_ip", "192.168.1.150") ?: "192.168.1.150"
+                    val port = prefs.getInt("last_server_port", 8765)
+                    val auto = prefs.getBoolean("last_auto_discover", false)
+                    val mode = prefs.getString("last_camera_mode", "rear") ?: "rear"
+                    result.success(mapOf(
+                        "serverIp" to ip,
+                        "serverPort" to port,
+                        "autoDiscover" to auto,
+                        "cameraMode" to mode
+                    ))
+                }
                 else -> result.notImplemented()
             }
         }

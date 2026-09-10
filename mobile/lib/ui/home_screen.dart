@@ -40,7 +40,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _streamService.setCameraMode(_selectedCameraMode);
     _refreshWifi();
     _refreshBatteryAndAutoStart();
+    _loadSavedConfig();
     _wifiPollTimer = Timer.periodic(const Duration(seconds: 4), (_) => _refreshWifi());
+  }
+
+  Future<void> _loadSavedConfig() async {
+    final cfg = await _streamService.getLastServerConfig();
+    if (cfg != null && mounted) {
+      setState(() {
+        final ip = cfg['serverIp'] as String?;
+        final port = cfg['serverPort'] as int?;
+        final autoDisc = cfg['autoDiscover'] as bool?;
+        final mode = cfg['cameraMode'] as String?;
+
+        if (ip != null && ip.isNotEmpty) {
+          _serverIpController.text = ip;
+        }
+        if (port != null && port > 0) {
+          _serverPortController.text = port.toString();
+        }
+        if (autoDisc != null) {
+          _autoDiscover = autoDisc;
+        }
+        if (mode != null && mode.isNotEmpty) {
+          _selectedCameraMode = mode;
+          _streamService.setCameraMode(mode);
+        }
+      });
+    }
   }
 
   @override

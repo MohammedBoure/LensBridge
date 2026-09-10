@@ -165,6 +165,15 @@ class StreamService extends ChangeNotifier {
     } catch (_) {}
   }
 
+  Future<Map<String, dynamic>?> getLastServerConfig() async {
+    try {
+      final res = await _methodChannel.invokeMapMethod<String, dynamic>('getLastServerConfig');
+      return res;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<bool> startBroadcast({
     String? serverIp,
     int serverPort = 8765,

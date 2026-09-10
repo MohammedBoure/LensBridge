@@ -92,6 +92,7 @@ class BackgroundStreamService : Service() {
 
     private val isStreaming = AtomicBoolean(false)
     private var discoveryThread: Thread? = null
+    @Volatile private var activeConnectionEpoch = 0L
 
     // Adaptive Discovery synchronization
     private val discoveryLock = java.lang.Object()
@@ -223,7 +224,8 @@ class BackgroundStreamService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 targetServerIp = intent.getStringExtra(EXTRA_SERVER_IP)?.trim()
-                targetServerPort = intent.getIntExtra(EXTRA_SERVER_PORT, 8765)
+                val portArg = intent.getIntExtra(EXTRA_SERVER_PORT, 0)
+                targetServerPort = if (portArg > 0) portArg else loadSavedServerPort()
                 autoDiscover = intent.getBooleanExtra(EXTRA_AUTO_DISCOVER, true)
                 cameraMode = intent.getStringExtra(EXTRA_CAMERA_MODE) ?: "rear"
 
@@ -232,6 +234,14 @@ class BackgroundStreamService : Service() {
 
                 startForegroundNotification()
                 isServiceRunning = true
+
+                // Invalidate ongoing connection epoch and close any prior websocket immediately
+                activeConnectionEpoch = System.currentTimeMillis()
+                try {
+                    webSocket?.cancel()
+                } catch (_: Exception) {}
+                webSocket = null
+                isStreaming.set(false)
 
                 // Priority 1: User explicitly provided an IP
                 if (!targetServerIp.isNullOrEmpty() && targetServerIp != "0.0.0.0") {
@@ -298,6 +308,11 @@ class BackgroundStreamService : Service() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val ip = prefs.getString(KEY_LAST_SERVER_IP, "") ?: ""
         return if (ip.isNotEmpty() && ip != "0.0.0.0") ip else null
+    }
+
+    private fun loadSavedServerPort(): Int {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getInt(KEY_LAST_SERVER_PORT, 8765)
     }
 
     private fun startForegroundNotification() {
@@ -435,17 +450,28 @@ class BackgroundStreamService : Service() {
     }
 
     private fun connectWebSocket(ip: String, port: Int) {
-        if (isStreaming.get()) return
+        val currentEpoch = System.currentTimeMillis()
+        activeConnectionEpoch = currentEpoch
+
+        try {
+            webSocket?.cancel()
+        } catch (_: Exception) {}
+        webSocket = null
+        isStreaming.set(false)
 
         val model = "${Build.MANUFACTURER} ${Build.MODEL}"
         val url = "ws://$ip:$port/ws/phone?device=${java.net.URLEncoder.encode(model, "UTF-8")}"
 
         notifyEvent("CONNECTING", mapOf("serverIp" to ip, "port" to port, "status" to "Connecting to $ip:$port..."))
-        Log.d(TAG, "Attempting WebSocket connection to: $url")
+        Log.d(TAG, "Attempting WebSocket connection to: $url (epoch=$currentEpoch)")
 
         val request = Request.Builder().url(url).build()
         webSocket = okHttpClient?.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (activeConnectionEpoch != currentEpoch) {
+                    try { webSocket.close(1000, "Superseded") } catch (_: Exception) {}
+                    return
+                }
                 Log.i(TAG, "WebSocket connected successfully to $ip:$port!")
                 isStreaming.set(true)
                 savePreferences(ip, port, autoDiscover, cameraMode)
@@ -550,6 +576,10 @@ class BackgroundStreamService : Service() {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (activeConnectionEpoch != currentEpoch) {
+                    Log.d(TAG, "Ignoring stale failure callback for epoch $currentEpoch")
+                    return
+                }
                 val errorMsg = t.localizedMessage ?: t.message ?: "Connection failed"
                 Log.w(TAG, "WebSocket connection failed to $ip:$port: $errorMsg")
                 isStreaming.set(false)
@@ -566,16 +596,18 @@ class BackgroundStreamService : Service() {
                     "reason" to "Cannot reach $ip:$port ($errorMsg)"
                 ))
 
-                // Opportunistic reconnect retry
+                // Opportunistic reconnect retry using latest configured parameters
                 if (isServiceRunning) {
                     try {
                         Thread.sleep(3000)
                     } catch (_: InterruptedException) {}
-                    if (isServiceRunning) {
+                    if (isServiceRunning && activeConnectionEpoch == currentEpoch) {
                         if (autoDiscover) {
                             startAdaptiveAutoDiscovery()
                         } else {
-                            connectWebSocket(ip, port)
+                            val retryIp = if (!targetServerIp.isNullOrEmpty() && targetServerIp != "0.0.0.0") targetServerIp!! else (loadSavedServerIp() ?: ip)
+                            val retryPort = if (targetServerPort > 0) targetServerPort else loadSavedServerPort()
+                            connectWebSocket(retryIp, retryPort)
                         }
                     }
                 }

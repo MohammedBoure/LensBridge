@@ -17,7 +17,7 @@ A cross-platform Flutter application built to capture and broadcast the phone's 
 
 - **`lib/`**: Flutter UI, business logic, configuration, and background service communication channels.
 - **`android/`**: Native Android platform implementation (Camera2 capture, AudioRecord PCM capture, foreground service, wake locks, and OkHttp WebSocket streaming).
-- **`pubspec.yaml`**: Flutter package manifest and dependencies (v1.1.0+2).
+- **`pubspec.yaml`**: Flutter package manifest and dependencies (v1.1.1+3).
 
 ## Building and Running
 
@@ -35,4 +35,4 @@ To build a standalone APK for your phone:
 flutter build apk --release
 ```
 The compiled release APK is located at:
-`mobile/build/app/outputs/flutter-apk/app-release.apk` (Version: `1.1.0+2`)
+`mobile/build/app/outputs/flutter-apk/app-release.apk` (Version: `1.1.1+3`)
