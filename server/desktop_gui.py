@@ -14,6 +14,7 @@ import urllib.parse
 from PySide6 import QtCore, QtGui, QtWidgets
 import websocket
 from config import HTTP_PORT, get_local_ip
+from auth import auth_manager
 
 
 class ProxyStreamWorker(QtCore.QThread):
@@ -30,7 +31,8 @@ class ProxyStreamWorker(QtCore.QThread):
         self.ws = None
 
     def run(self):
-        url = f"ws://127.0.0.1:{self.port}/ws/proxy"
+        token = auth_manager.get_service_token()
+        url = f"ws://127.0.0.1:{self.port}/ws/proxy?token={token}"
         while self.running:
             try:
                 self.status_signal.emit("Connecting to local proxy core...", False)
@@ -76,6 +78,8 @@ class ProxyStreamWorker(QtCore.QThread):
 
 class MainWindow(QtWidgets.QMainWindow):
     """Main window of the Vision Desktop Server & Stream Proxy."""
+
+    devices_updated_signal = QtCore.Signal(dict)
 
     def __init__(self, port: int = HTTP_PORT):
         super().__init__()
@@ -233,6 +237,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.phone_status_label.setStyleSheet("color: #f59e0b; font-weight: bold;")
         status_layout.addWidget(self.phone_status_label)
 
+        # Active Broadcaster Device Selector (Multi-connection support)
+        dev_row = QtWidgets.QHBoxLayout()
+        dev_lbl = QtWidgets.QLabel("Active Device:")
+        dev_lbl.setStyleSheet("color: #94a3b8; font-weight: bold; font-size: 11px;")
+        dev_row.addWidget(dev_lbl)
+
+        self.device_combo = QtWidgets.QComboBox()
+        self.device_combo.setStyleSheet("background-color: #1f2937; color: #38bdf8; font-weight: bold; padding: 4px 8px; border-radius: 6px;")
+        self.device_combo.addItem("No broadcasters connected", None)
+        self.device_combo.currentIndexChanged.connect(self.on_device_selected)
+        dev_row.addWidget(self.device_combo, 1)
+        status_layout.addLayout(dev_row)
+
         server_info = QtWidgets.QLabel(f"Server Host: {self.local_ip}:{self.port} (24/7 Always-On)")
         server_info.setStyleSheet("color: #8b949e; font-size: 11px; font-family: monospace;")
         status_layout.addWidget(server_info)
@@ -244,21 +261,23 @@ class MainWindow(QtWidgets.QMainWindow):
         right_box.addWidget(status_group)
 
         # 2. Reverse / Proxy Stream Endpoints Card
-        proxy_group = QtWidgets.QGroupBox("Stream Endpoints (Video & Audio)")
+        proxy_group = QtWidgets.QGroupBox("Stream Endpoints (Video & Audio with Token)")
         proxy_group.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; margin-top: 6px; padding-top: 12px; }")
         proxy_layout = QtWidgets.QVBoxLayout(proxy_group)
         proxy_layout.setSpacing(8)
 
-        self.mjpeg_url = f"http://127.0.0.1:{self.port}/stream/video"
+        viewer_token = auth_manager.get_token_by_role("viewer") or auth_manager.get_service_token()
+
+        self.mjpeg_url = f"http://127.0.0.1:{self.port}/stream/video?token={viewer_token}"
         proxy_layout.addWidget(self._build_copy_row("MJPEG Video Stream (OpenCV / VLC):", self.mjpeg_url))
 
-        self.audio_url = f"http://127.0.0.1:{self.port}/stream/audio"
+        self.audio_url = f"http://127.0.0.1:{self.port}/stream/audio?token={viewer_token}"
         proxy_layout.addWidget(self._build_copy_row("Microphone Audio Stream (WAV / VLC):", self.audio_url))
 
-        self.ws_proxy_url = f"ws://127.0.0.1:{self.port}/ws/proxy"
+        self.ws_proxy_url = f"ws://127.0.0.1:{self.port}/ws/proxy?token={viewer_token}"
         proxy_layout.addWidget(self._build_copy_row("WebSocket Video Proxy (Raw Frames):", self.ws_proxy_url))
 
-        self.snapshot_url = f"http://127.0.0.1:{self.port}/snapshot"
+        self.snapshot_url = f"http://127.0.0.1:{self.port}/snapshot?token={viewer_token}"
         proxy_layout.addWidget(self._build_copy_row("Single Frame Snapshot:", self.snapshot_url))
 
         right_box.addWidget(proxy_group)
@@ -268,17 +287,22 @@ class MainWindow(QtWidgets.QMainWindow):
         api_group.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; margin-top: 6px; padding-top: 12px; }")
         api_layout = QtWidgets.QVBoxLayout(api_group)
 
+        token = auth_manager.get_service_token()
         api_snippet = (
-            "# Internal API Examples (Python):\n"
+            "# Internal API Examples (Python with Token Permissions):\n"
             "import requests\n\n"
+            f'BASE_URL = "http://127.0.0.1:{self.port}"\n'
+            f'HEADERS = {{"X-API-Key": "{token}"}}\n\n'
             "# 1. Turn Flash ON / OFF\n"
-            f'requests.post("http://127.0.0.1:{self.port}/api/flash", json={{"enabled": True}})\n\n'
+            f'requests.post(f"{{BASE_URL}}/api/flash", json={{"enabled": True}}, headers=HEADERS)\n\n'
             "# 2. Set Target Framerate (e.g. 15 FPS for low power)\n"
-            f'requests.post("http://127.0.0.1:{self.port}/api/fps", json={{"fps": 15}})\n\n'
+            f'requests.post(f"{{BASE_URL}}/api/fps", json={{"fps": 15}}, headers=HEADERS)\n\n'
             "# 3. Set Compression Quality (10 - 100)\n"
-            f'requests.post("http://127.0.0.1:{self.port}/api/quality", json={{"quality": 60}})\n\n'
+            f'requests.post(f"{{BASE_URL}}/api/quality", json={{"quality": 60}}, headers=HEADERS)\n\n'
             "# 4. Enable / Disable Microphone Audio\n"
-            f'requests.post("http://127.0.0.1:{self.port}/api/audio", json={{"enabled": True}})\n'
+            f'requests.post(f"{{BASE_URL}}/api/audio", json={{"enabled": True}}, headers=HEADERS)\n\n'
+            "# 5. Query and Switch Connected Broadcast Devices\n"
+            f'devices = requests.get(f"{{BASE_URL}}/api/devices", headers=HEADERS).json()\n'
         )
 
         code_text = QtWidgets.QTextEdit()
@@ -306,12 +330,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Vision Proxy running. Internal API ready 24/7.")
 
+        # Connect thread-safe signal for device updates
+        self.devices_updated_signal.connect(self._update_devices_ui)
+
         # Start Stream Worker
         self.worker = ProxyStreamWorker(port=self.port)
         self.worker.frame_signal.connect(self.update_frame)
         self.worker.status_signal.connect(self.update_status)
         self.worker.event_signal.connect(self.handle_event)
         self.worker.start()
+
+        # Initial device list fetch
+        self.refresh_devices()
 
     def _build_copy_row(self, label_text: str, url_text: str) -> QtWidgets.QWidget:
         container = QtWidgets.QWidget()
@@ -343,13 +373,56 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(row)
         return container
 
+    def on_device_selected(self, index: int):
+        session_id = self.device_combo.itemData(index)
+        if session_id:
+            self._call_api_async("/api/devices/select", {"session_id": session_id})
+
+    def refresh_devices(self):
+        """Asynchronously query connected broadcaster sources."""
+        def run():
+            try:
+                url = f"http://127.0.0.1:{self.port}/api/devices"
+                token = auth_manager.get_service_token()
+                req = urllib.request.Request(url, headers={"X-API-Key": token})
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    self.devices_updated_signal.emit(data)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _update_devices_ui(self, data: dict):
+        sources = data.get("sources", [])
+        active_id = data.get("active_source_id")
+        self.device_combo.blockSignals(True)
+        self.device_combo.clear()
+        if not sources:
+            self.device_combo.addItem("No broadcasters connected", None)
+        else:
+            selected_idx = 0
+            for i, src in enumerate(sources):
+                title = f"{src.get('device_model', 'Device')} ({src.get('client_ip')})"
+                if src.get("session_id") == active_id:
+                    title += " [Active]"
+                    selected_idx = i
+                self.device_combo.addItem(title, src.get("session_id"))
+            self.device_combo.setCurrentIndex(selected_idx)
+        self.device_combo.blockSignals(False)
+
     def _call_api_async(self, endpoint: str, json_data: dict):
-        """Asynchronously triggers an internal API request."""
+        """Asynchronously triggers an internal API request with service token auth."""
         def run():
             try:
                 url = f"http://127.0.0.1:{self.port}{endpoint}"
                 data = json.dumps(json_data).encode("utf-8")
-                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                token = auth_manager.get_service_token()
+                headers = {
+                    "Content-Type": "application/json",
+                    "X-API-Key": token
+                }
+                req = urllib.request.Request(url, data=data, headers=headers)
                 with urllib.request.urlopen(req, timeout=3) as resp:
                     resp.read()
             except Exception as e:
@@ -430,10 +503,14 @@ class MainWindow(QtWidgets.QMainWindow):
             info = data.get("phone_info", {})
             self.phone_status_label.setText(f"● Phone Connected ({info.get('ip', 'Wi-Fi')} - {info.get('device_model', 'Mobile')})")
             self.phone_status_label.setStyleSheet("color: #00e676; font-weight: bold;")
+            self.refresh_devices()
         elif event_type == "PHONE_DISCONNECTED":
             self.phone_status_label.setText("● Phone: Disconnected (Waiting for stream...)")
             self.phone_status_label.setStyleSheet("color: #f59e0b; font-weight: bold;")
             self.fps_badge.setText("0.0 FPS")
+            self.refresh_devices()
+        elif event_type in ("ACTIVE_SOURCE_SWITCHED", "DEVICE_INFO_UPDATED"):
+            self.refresh_devices()
         elif event_type in ("CONTROL_UPDATED", "PHONE_STATE_SYNC"):
             controls = data.get("controls", {})
             if "flash_enabled" in controls:

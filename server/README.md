@@ -12,6 +12,16 @@ This directory contains the desktop backend program, UDP auto-discovery responde
   - **Live Audio Stream (WAV)**: `http://<IP>:8765/stream/audio?format=wav`. Standard streamable RIFF audio consumable by VLC, FFmpeg, browsers, and media software.
   - **Raw Audio Stream (PCM)**: `http://<IP>:8765/stream/audio?format=pcm`. 16kHz 16-bit Mono PCM bytes.
   - **WebSocket Audio Proxy**: `ws://<IP>:8765/ws/audio`. Real-time audio chunks for browser players or custom listeners.
+- **Multi-Broadcaster Resilience & Automatic Failover**:
+  - **Multiple Concurrent Sources**: Concurrently connects multiple phone cameras (`/ws/phone`), with each connection identified by an isolated session ID.
+  - **Race-Condition Immunity**: Rapid reconnect loops never drop active streaming; an old disconnecting socket's teardown cannot kill a newly reconnected session.
+  - **Seamless Failover**: If the active camera disconnects, the server automatically fails over to the next available source without dropping external subscribers (OpenCV, VLC, web clients).
+  - **Device Management**: `GET /api/devices` lists connected sources with frame rates, telemetry, and uptimes; `POST /api/devices/select` switches the primary broadcast device.
+- **Granular Internal API Permissions & Access Control**:
+  - **Fine-Grained Scopes**: `control:flash`, `control:fps`, `control:quality`, `control:audio`, `control:*`, `stream:video`, `stream:audio`, `status:read`, `admin`, `*`.
+  - **Predefined Roles**: `admin` (super-user), `operator` (stream + control), `viewer` (read-only streams), `controller` (hardware adjustments).
+  - **Flexible Authentication**: Supports `X-API-Key` header, `Authorization: Bearer <token>`, and query parameters (`?token=<token>` or `?api_key=<token>`) for seamless integration with OpenCV and HTML media tags.
+  - **Loopback Bypass**: Localhost calls (127.0.0.1) can optionally bypass auth for desktop ease, or enforce strict tokens via `auth_manager.allow_local_loopback_bypass = False`.
 - **Internal REST API (Remote Hardware Controls)**:
   - **Flash / Torch Control**: `POST /api/flash` with `{"enabled": true/false}` (or query param `?enabled=true`). Turns rear camera flashlight on/off without interrupting video.
   - **Framerate / Number of Frames Control**: `POST /api/fps` with `{"fps": 15}` (1 - 60 FPS). Hardware frame throttling to maximize phone battery life and save Wi-Fi energy.
@@ -23,12 +33,15 @@ This directory contains the desktop backend program, UDP auto-discovery responde
 
 ## Files and Directory Structure
 
-- **`config.py`**: Central configuration defining ports (`8765` HTTP, `45454` UDP), default audio parameters, and hardware settings.
+- **`config.py`**: Central configuration defining ports (`8765` HTTP, `45454` UDP), auth toggles, and multi-broadcast limits.
+- **`auth.py`**: Token authentication and role-based permissions engine with granular scope verification (`PermissionScope`, `ROLE_DEFINITIONS`, `PermissionsManager`).
+- **`permissions.example.json`**: Template for role-based token configuration isolated from git commits.
 - **`discovery.py`**: UDP discovery responder and beacon broadcaster on port `45454`. Listens for `VISION_DISCOVER_PROBE` and announces server coordinates.
-- **`stream_hub.py`**: Central proxy engine managing video and audio ingestion, queue-based pub/sub dispatch, dropped-frame protection, client telemetry, and two-way control dispatch.
-- **`app.py`**: FastAPI server exposing video and audio endpoints (`/stream/video`, `/stream/audio`, `/ws/proxy`, `/ws/audio`, `/snapshot`), ingestion endpoint (`/ws/phone`), and internal control APIs (`/api/flash`, `/api/quality`, `/api/fps`, `/api/audio`, `/api/control`, `/api/status`).
-- **`desktop_gui.py`**: Native Windows PySide6 desktop GUI with live video feed, remote control buttons (flash, quality slider, FPS combo, audio toggle), copyable proxy URLs, and code snippets.
-- **`client_example.py`**: Python reference script demonstrating internal API programmatic control and video/audio consumption.
+- **`stream_hub.py`**: Central proxy engine managing multi-broadcaster session lifecycle, queue-based pub/sub dispatch, seamless auto-failover, telemetry, and two-way control dispatch.
+- **`app.py`**: FastAPI server exposing video/audio endpoints, ingestion endpoint (`/ws/phone`), multi-device management (`/api/devices`), auth management (`/api/auth/*`), and internal control APIs.
+- **`desktop_gui.py`**: Native Windows PySide6 desktop GUI with live video feed, device selection dropdown, remote control buttons, copyable token URLs, and code snippets.
+- **`client_example.py`**: Python reference script demonstrating token authentication, permission scope enforcement, multi-device querying, and hardware control.
+- **`test_resilience_and_permissions.py`**: Automated test suite verifying multi-broadcaster failover, race-condition handling, token validation (401, 403, 200), and endpoint streaming.
 - **`main.py`**: Orchestrator launching UDP discovery, Uvicorn backend, and desktop GUI in unison.
 - **`service_main.py`**: Headless background service daemon for 24/7 invisible execution with rotating file logging (`service.log`).
 - **`service_manager.ps1`**: PowerShell service automation script (`install`, `uninstall`, `start`, `stop`, `restart`, `status`).
@@ -40,7 +53,7 @@ This directory contains the desktop backend program, UDP auto-discovery responde
 - **`status_service.bat`**: 1-click background service telemetry & endpoint inspector.
 - **`requirements.txt`**: Python dependencies (`fastapi`, `uvicorn`, `PySide6`, `websocket-client`, `Pillow`).
 - **`run_server.bat`**: Double-clickable Windows batch launcher for interactive desktop GUI mode.
-- **`static/`**: Web dashboard assets (`index.html`, `style.css`, `app.js`) with in-browser audio playback and control toggles.
+- **`static/`**: Web dashboard assets (`index.html`, `style.css`, `app.js`) with in-browser audio playback, token support, and control toggles.
 
 ## Internal Program Integration Example
 

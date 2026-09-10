@@ -21,6 +21,17 @@ AUDIO_CHANNELS = 1
 AUDIO_BIT_DEPTH = 16
 AUDIO_CHUNK_SIZE = 2048
 
+# Multi-Connection & Broadcaster Resilience
+MAX_BROADCAST_SOURCES = 10
+RECONNECT_GRACE_PERIOD_SEC = 5.0
+
+# Internal API Authentication & Permissions
+import os
+API_AUTH_ENABLED = os.environ.get("VISION_AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
+ALLOW_LOCAL_LOOPBACK_BYPASS = os.environ.get("VISION_LOCAL_BYPASS", "false").lower() in ("true", "1", "yes")
+PERMISSIONS_FILE = os.path.join(os.path.dirname(__file__), "permissions.json")
+
+
 def get_local_ip() -> str:
     """Detects the active local LAN/Wi-Fi IP address of the host machine."""
     try:

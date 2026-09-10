@@ -10,9 +10,10 @@ Acts as a high-performance proxy broker for:
 import asyncio
 import collections
 import json
+import secrets
 import struct
 import time
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, List
 from fastapi import WebSocket
 
 from config import (
@@ -105,11 +106,72 @@ class AudioStats:
         }
 
 
+class BroadcastSource:
+    """Represents an active or standby broadcasting device (e.g. mobile phone)."""
+
+    def __init__(self, session_id: str, websocket: WebSocket, client_ip: str, device_model: str):
+        self.session_id = session_id
+        self.websocket = websocket
+        self.client_ip = client_ip
+        self.device_model = device_model
+        self.connected_at = time.time()
+        self.last_active = time.time()
+        self.frames_received = 0
+        self.audio_chunks_received = 0
+        self.is_active = False
+        self.device_info: dict = {
+            "device_model": device_model,
+            "ip": client_ip,
+            "battery": "N/A",
+            "flash_supported": "Unknown",
+        }
+
+    def to_dict(self) -> dict:
+        now = time.time()
+        return {
+            "session_id": self.session_id,
+            "device_model": self.device_model,
+            "ip": self.client_ip,
+            "connected_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.connected_at)),
+            "uptime_seconds": round(now - self.connected_at, 1),
+            "last_active_seconds_ago": round(now - self.last_active, 2),
+            "frames_received": self.frames_received,
+            "audio_chunks_received": self.audio_chunks_received,
+            "is_active": self.is_active,
+            "battery": self.device_info.get("battery", "N/A"),
+            "flash_supported": self.device_info.get("flash_supported", "Unknown"),
+        }
+
+
+# Minimal valid 1x1 JPEG bytes used as placeholder/standby frame
+STANDBY_JPEG = (
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xdb\x00C\x00\x08\x06\x06"
+    b"\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a"
+    b"\x1f\x1e\x1d\x1a\x1c\x1c $.' \",#\x1c\x1c(7),01444\x1f'9=82<.342\xff\xc0\x00\x0b\x08\x00\x01"
+    b"\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00"
+    b"\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\xff\xda\x00\x08\x01\x01\x00\x00"
+    b"?\x00\xbf\x00\xff\xd9"
+)
+
+
 class StreamHub:
-    """Central proxy broker coordinating mobile camera stream, audio, controls, and external programs."""
+    """
+    Central Coordinator for Video Frames, Microphone Audio, and Remote Hardware Controls.
+    Supports multiple concurrent phone broadcaster connections, seamless automatic failover,
+    non-blocking client disconnect handling, and granular proxy access.
+    """
 
     def __init__(self):
-        self.phone_socket: Optional[WebSocket] = None
+        # Connected broadcaster devices
+        self.sources: Dict[str, BroadcastSource] = {}
+        self.active_source_id: Optional[str] = None
+        self._hub_lock = asyncio.Lock()
+
+        # Telemetry & counters
+        self.total_connections_count: int = 0
+        self.total_disconnections_count: int = 0
+
+        # Proxy client sets
         self.proxy_clients: Set[WebSocket] = set()
         self.audio_proxy_clients: Set[WebSocket] = set()
         self.latest_frame: bytes = b""
@@ -134,36 +196,153 @@ class StreamHub:
             "flash_supported": "Unknown",
         }
 
-    async def register_phone(self, websocket: WebSocket, client_ip: str, device_model: str = "Mobile"):
-        """Registers the mobile phone as the active streaming source and synchronizes settings."""
-        self.phone_socket = websocket
-        self.phone_info = {
-            "device_model": device_model,
-            "connected_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "ip": client_ip,
-            "battery": "N/A",
-            "flash_supported": "Unknown",
-        }
-        print(f"[StreamHub] Phone connected from {client_ip} ({device_model})")
+    @property
+    def phone_socket(self) -> Optional[WebSocket]:
+        """Returns the WebSocket connection of the active primary broadcast source."""
+        if self.active_source_id and self.active_source_id in self.sources:
+            return self.sources[self.active_source_id].websocket
+        return None
 
-        # Sync server control parameters with phone immediately
-        await self.send_phone_control("set_flash", enabled=self.flash_enabled)
-        await self.send_phone_control("set_quality", quality=self.jpeg_quality)
-        await self.send_phone_control("set_fps", fps=self.target_fps)
-        await self.send_phone_control("set_audio", enabled=self.audio_enabled)
+    async def register_phone(self, websocket: WebSocket, client_ip: str, device_model: str = "Mobile") -> str:
+        """
+        Registers a broadcasting phone session.
+        Gracefully supersedes any prior stale connection from the same device/IP
+        and smoothly sets the new connection as the active source.
+        """
+        async with self._hub_lock:
+            now_ms = int(time.time() * 1000)
+            session_id = f"src_{now_ms}_{secrets.token_hex(4)}"
+
+            # Clean up previous stale connections from the exact same client IP
+            superseded = [
+                s_id for s_id, src in self.sources.items()
+                if src.client_ip == client_ip and s_id != session_id
+            ]
+            was_active_superseded = (self.active_source_id in superseded)
+            for s_id in superseded:
+                old_source = self.sources.pop(s_id, None)
+                if old_source:
+                    try:
+                        await old_source.websocket.close(code=1000, reason="Replaced by new connection session")
+                    except Exception:
+                        pass
+
+            source = BroadcastSource(session_id, websocket, client_ip, device_model)
+
+            # Keep active source uninterrupted if another phone connects concurrently;
+            # activate immediately if no active source exists or if reconnecting same device.
+            should_activate = (
+                self.active_source_id is None
+                or self.active_source_id not in self.sources
+                or was_active_superseded
+            )
+
+            if should_activate:
+                for s in self.sources.values():
+                    s.is_active = False
+                source.is_active = True
+                self.active_source_id = session_id
+                self.phone_info = {
+                    "device_model": device_model,
+                    "connected_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "ip": client_ip,
+                    "battery": "N/A",
+                    "flash_supported": "Unknown",
+                }
+            else:
+                source.is_active = False
+
+            self.sources[session_id] = source
+            self.total_connections_count += 1
+            print(f"[StreamHub] Broadcaster connected: {device_model} @ {client_ip} (Session: {session_id}, Active: {'YES' if should_activate else 'NO'}, Total: {len(self.sources)})")
+
+        # Synchronize current server hardware parameters to the newly connected phone
+        await self.send_phone_control("set_flash", target_session_id=session_id, enabled=self.flash_enabled)
+        await self.send_phone_control("set_quality", target_session_id=session_id, quality=self.jpeg_quality)
+        await self.send_phone_control("set_fps", target_session_id=session_id, fps=self.target_fps)
+        await self.send_phone_control("set_audio", target_session_id=session_id, enabled=self.audio_enabled)
 
         await self.broadcast_event({
             "type": "PHONE_CONNECTED",
+            "session_id": session_id,
             "phone_info": self.phone_info,
+            "connected_sources": [s.to_dict() for s in self.sources.values()],
             "controls": self.get_controls_dict(),
         })
 
-    async def unregister_phone(self):
-        """Handles phone disconnection gracefully without stopping proxy listeners."""
-        print("[StreamHub] Phone disconnected. Waiting for reconnection...")
-        self.phone_socket = None
-        self.phone_info = {"device_model": "None", "connected_at": "", "ip": "", "battery": "N/A", "flash_supported": "Unknown"}
-        await self.broadcast_event({"type": "PHONE_DISCONNECTED"})
+        return session_id
+
+    async def unregister_phone(self, session_id: str):
+        """
+        Gracefully unregisters a specific broadcasting session upon disconnection.
+        If multiple broadcasters are connected, seamlessly fails over to the next available source
+        without interrupting external proxy subscribers.
+        """
+        async with self._hub_lock:
+            if session_id not in self.sources:
+                # Already cleaned up or superseded
+                return
+
+            disconnected_source = self.sources.pop(session_id, None)
+            self.total_disconnections_count += 1
+            desc = f"{disconnected_source.device_model} @ {disconnected_source.client_ip}" if disconnected_source else session_id
+            print(f"[StreamHub] Broadcaster disconnected: {desc} (Remaining: {len(self.sources)})")
+
+            # Check if disconnected source was the active primary
+            if self.active_source_id == session_id:
+                if self.sources:
+                    # Seamless failover to next connected broadcaster!
+                    new_active_id = next(iter(self.sources.keys()))
+                    self.active_source_id = new_active_id
+                    new_source = self.sources[new_active_id]
+                    new_source.is_active = True
+
+                    self.phone_info = new_source.device_info.copy()
+                    self.phone_info["connected_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(new_source.connected_at))
+
+                    print(f"[StreamHub] Active broadcast seamlessly failed over to: {new_source.device_model} ({new_active_id})")
+                    await self.broadcast_event({
+                        "type": "ACTIVE_SOURCE_SWITCHED",
+                        "active_session_id": new_active_id,
+                        "phone_info": self.phone_info,
+                        "connected_sources": [s.to_dict() for s in self.sources.values()],
+                    })
+                    return
+                else:
+                    self.active_source_id = None
+                    self.phone_info = {
+                        "device_model": "None",
+                        "connected_at": "",
+                        "ip": "",
+                        "battery": "N/A",
+                        "flash_supported": "Unknown",
+                    }
+                    await self.broadcast_event({
+                        "type": "PHONE_DISCONNECTED",
+                        "connected_sources": [],
+                    })
+
+    async def set_active_source(self, session_id: str) -> bool:
+        """Manually switches the active broadcast source when multiple cameras are connected."""
+        async with self._hub_lock:
+            if session_id not in self.sources:
+                return False
+
+            for s_id, s in self.sources.items():
+                s.is_active = (s_id == session_id)
+
+            self.active_source_id = session_id
+            active_source = self.sources[session_id]
+            self.phone_info = active_source.device_info.copy()
+            self.phone_info["connected_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(active_source.connected_at))
+
+            await self.broadcast_event({
+                "type": "ACTIVE_SOURCE_SWITCHED",
+                "active_session_id": session_id,
+                "phone_info": self.phone_info,
+                "connected_sources": [s.to_dict() for s in self.sources.values()],
+            })
+            return True
 
     async def register_proxy(self, websocket: WebSocket):
         """Registers an internal program or viewer to receive live raw video frames."""
@@ -188,22 +367,39 @@ class StreamHub:
 
     # ---------------- Control Methods ---------------- #
 
-    async def send_phone_control(self, action: str, **kwargs) -> bool:
-        """Sends a JSON control instruction to the mobile phone over WebSocket."""
-        if not self.phone_socket:
-            return False
-        try:
-            payload = {"type": "CONTROL", "action": action, **kwargs}
-            await self.phone_socket.send_text(json.dumps(payload))
-            return True
-        except Exception as e:
-            print(f"[StreamHub] Error sending control to phone: {e}")
+    async def send_phone_control(self, action: str, target_session_id: Optional[str] = None, **kwargs) -> bool:
+        """Sends a JSON control instruction to the active mobile phone or a specific target session."""
+        payload = json.dumps({"type": "CONTROL", "action": action, **kwargs})
+
+        # If a specific target session was provided, deliver to it
+        if target_session_id and target_session_id in self.sources:
+            try:
+                await self.sources[target_session_id].websocket.send_text(payload)
+                return True
+            except Exception as e:
+                print(f"[StreamHub] Error sending control to {target_session_id}: {e}")
+                return False
+
+        # Otherwise deliver to active source, or broadcast to all connected sources
+        if not self.sources:
             return False
 
-    async def set_flash(self, enabled: bool) -> bool:
+        delivered_any = False
+        targets = [self.sources[self.active_source_id]] if (self.active_source_id and self.active_source_id in self.sources) else list(self.sources.values())
+
+        for src in targets:
+            try:
+                await src.websocket.send_text(payload)
+                delivered_any = True
+            except Exception as e:
+                print(f"[StreamHub] Error sending control to source {src.session_id}: {e}")
+
+        return delivered_any
+
+    async def set_flash(self, enabled: bool, target_session_id: Optional[str] = None) -> bool:
         """Turns the rear camera flash on or off."""
         self.flash_enabled = bool(enabled)
-        sent = await self.send_phone_control("set_flash", enabled=self.flash_enabled)
+        sent = await self.send_phone_control("set_flash", target_session_id=target_session_id, enabled=self.flash_enabled)
         await self.broadcast_event({
             "type": "CONTROL_UPDATED",
             "control": "flash",
@@ -212,11 +408,11 @@ class StreamHub:
         })
         return sent
 
-    async def set_quality(self, quality: int) -> bool:
+    async def set_quality(self, quality: int, target_session_id: Optional[str] = None) -> bool:
         """Programmatically controls the hardware JPEG compression quality (10 - 100)."""
         clamped = max(10, min(100, int(quality)))
         self.jpeg_quality = clamped
-        sent = await self.send_phone_control("set_quality", quality=clamped)
+        sent = await self.send_phone_control("set_quality", target_session_id=target_session_id, quality=clamped)
         await self.broadcast_event({
             "type": "CONTROL_UPDATED",
             "control": "quality",
@@ -225,11 +421,11 @@ class StreamHub:
         })
         return sent
 
-    async def set_fps(self, fps: int) -> bool:
+    async def set_fps(self, fps: int, target_session_id: Optional[str] = None) -> bool:
         """Programmatically controls the target framerate (1 - 60 FPS)."""
         clamped = max(1, min(60, int(fps)))
         self.target_fps = clamped
-        sent = await self.send_phone_control("set_fps", fps=clamped)
+        sent = await self.send_phone_control("set_fps", target_session_id=target_session_id, fps=clamped)
         await self.broadcast_event({
             "type": "CONTROL_UPDATED",
             "control": "fps",
@@ -238,10 +434,10 @@ class StreamHub:
         })
         return sent
 
-    async def set_audio(self, enabled: bool) -> bool:
+    async def set_audio(self, enabled: bool, target_session_id: Optional[str] = None) -> bool:
         """Enables or disables microphone audio capture and transmission."""
         self.audio_enabled = bool(enabled)
-        sent = await self.send_phone_control("set_audio", enabled=self.audio_enabled)
+        sent = await self.send_phone_control("set_audio", target_session_id=target_session_id, enabled=self.audio_enabled)
         await self.broadcast_event({
             "type": "CONTROL_UPDATED",
             "control": "audio",
@@ -257,14 +453,17 @@ class StreamHub:
             "quality": self.jpeg_quality,
             "fps": self.target_fps,
             "audio_enabled": self.audio_enabled,
-            "phone_connected": self.phone_socket is not None,
+            "phone_connected": bool(self.sources),
+            "active_source_id": self.active_source_id,
+            "connected_sources_count": len(self.sources),
         }
 
     # ---------------- Stream Ingestion & Dispatch ---------------- #
 
-    async def handle_incoming_frame(self, raw_bytes: bytes):
+    async def handle_incoming_frame(self, raw_bytes: bytes, session_id: Optional[str] = None):
         """
-        Processes a raw binary packet from the mobile phone.
+        Processes a raw binary packet from a specific mobile session.
+        Only dispatches to external consumers if the session is the active primary broadcaster.
 
         Byte layout:
           - 0x00: Rear Camera JPEG frame
@@ -275,12 +474,21 @@ class StreamHub:
         if len(raw_bytes) < 4:
             return
 
+        # Track per-source activity telemetry
+        source = self.sources.get(session_id) if session_id else None
+        if source:
+            source.last_active = time.time()
+
         prefix = raw_bytes[0]
 
         # Audio chunk packet (0x02)
         if prefix == 0x02:
-            pcm_payload = raw_bytes[1:]
-            await self.handle_incoming_audio(pcm_payload)
+            if source:
+                source.audio_chunks_received += 1
+            # Forward audio if it's the active source or the only source
+            if not self.active_source_id or session_id == self.active_source_id:
+                pcm_payload = raw_bytes[1:]
+                await self.handle_incoming_audio(pcm_payload)
             return
 
         # Front camera frame (0x01): skip to preserve bandwidth and focus on rear camera
@@ -292,6 +500,13 @@ class StreamHub:
             jpeg_payload = raw_bytes[1:]
         else:
             jpeg_payload = raw_bytes
+
+        if source:
+            source.frames_received += 1
+
+        # Only forward frames from the active primary broadcast session
+        if self.active_source_id and session_id != self.active_source_id:
+            return
 
         # Update cache and telemetry
         self.latest_frame = jpeg_payload
@@ -363,12 +578,16 @@ class StreamHub:
         for dead in dead_clients:
             self.proxy_clients.discard(dead)
 
+    def get_standby_frame(self) -> bytes:
+        """Returns placeholder JPEG frame when no mobile broadcaster is actively streaming."""
+        return STANDBY_JPEG
+
     # ---------------- HTTP Stream Generators ---------------- #
 
     async def generate_mjpeg_stream(self):
         """
         Asynchronous generator for HTTP multipart/x-mixed-replace MJPEG video stream.
-        Universal compatibility for OpenCV, VLC, web browsers, and internal programs.
+        Maintains seamless connection through phone disconnections and rapid reconnects.
         """
         q = asyncio.Queue(maxsize=3)
         if self.latest_frame:
@@ -377,11 +596,13 @@ class StreamHub:
         try:
             while True:
                 try:
-                    frame = await asyncio.wait_for(q.get(), timeout=2.0)
+                    frame = await asyncio.wait_for(q.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     if self.latest_frame:
                         frame = self.latest_frame
+                        await asyncio.sleep(0.15)
                     else:
+                        await asyncio.sleep(0.2)
                         continue
 
                 header = (
@@ -397,7 +618,7 @@ class StreamHub:
         """
         Asynchronous generator for live microphone audio streaming.
         Supports WAV streaming (with standard 44-byte continuous header) or raw PCM.
-        Compatible with VLC, FFmpeg, and Python requests/sounddevice.
+        Gracefully preserves audio stream pipe through broadcaster reconnection cycles.
         """
         q = asyncio.Queue(maxsize=15)
         self._audio_subscribers.add(q)
@@ -427,19 +648,25 @@ class StreamHub:
 
             while True:
                 try:
-                    chunk = await asyncio.wait_for(q.get(), timeout=2.0)
+                    chunk = await asyncio.wait_for(q.get(), timeout=1.0)
                     yield chunk
                 except asyncio.TimeoutError:
-                    # Keep connection alive with silent frame if audio is paused
+                    # Keep connection alive with short silence packet if audio stream is idle/reconnecting
+                    await asyncio.sleep(0.15)
                     silence = b"\x00" * 320
                     yield silence
         finally:
             self._audio_subscribers.discard(q)
 
     def get_stats(self) -> dict:
-        """Returns streaming telemetry, audio metrics, and remote controls state."""
+        """Returns streaming telemetry, multi-device broadcaster state, and controls."""
         return {
-            "phone_connected": self.phone_socket is not None,
+            "phone_connected": bool(self.sources),
+            "active_source_id": self.active_source_id,
+            "connected_devices_count": len(self.sources),
+            "connected_devices": [s.to_dict() for s in self.sources.values()],
+            "total_connections": self.total_connections_count,
+            "total_disconnections": self.total_disconnections_count,
             "phone_info": self.phone_info,
             "stream": self.stats.to_dict(),
             "audio": self.audio_stats.to_dict(),
@@ -451,3 +678,4 @@ class StreamHub:
 
 # Global singleton instance
 hub = StreamHub()
+

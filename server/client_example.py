@@ -1,100 +1,142 @@
-"""Vision Stream Bridge • Internal Program Integration & Control Example.
+"""Vision Stream Bridge • Internal Program Integration & Permissions Example.
 
-Demonstrates how external/internal Python software (AI inference pipelines, OpenCV,
-automated testing, VLC/audio recorders) can programmatically control the mobile hardware
-via the Vision Desktop Server Internal REST API and consume video & audio streams.
+Demonstrates how internal software (AI inference pipelines, OpenCV,
+automated testing, VLC/audio recorders, robot control systems) can:
+1. Authenticate with Granular API Tokens (via X-API-Key, Bearer Header, or Query Params).
+2. Exercise role-based permissions (Viewer vs Controller vs Admin).
+3. Query and programmatically switch between multiple connected camera sources (/api/devices).
+4. Control remote hardware (Flashlight torch, Framerate throttling, JPEG quality, Microphone audio).
 """
 
+import sys
 import time
 import urllib.request
+import urllib.error
+import urllib.parse
 import json
 
 SERVER_URL = "http://127.0.0.1:8765"
 
 
-def call_api(endpoint: str, payload: dict) -> dict:
-    """Helper function to perform an HTTP POST request to the Internal API."""
+def http_request(method: str, endpoint: str, payload: dict = None, token: str = None) -> tuple[int, dict]:
+    """Helper function to execute HTTP requests with optional token authentication."""
     url = f"{SERVER_URL}{endpoint}"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-API-Key"] = token
 
-
-def get_status() -> dict:
-    """Retrieves full system telemetry, URLs, and hardware control states."""
-    with urllib.request.urlopen(f"{SERVER_URL}/api/status") as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8")
+            return resp.status, json.loads(body) if body else {}
+    except urllib.error.HTTPError as err:
+        body = err.read().decode("utf-8")
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            parsed = {"error": body}
+        return err.code, parsed
+    except urllib.error.URLError as err:
+        return 0, {"error": str(err.reason)}
 
 
 def main():
-    print("=" * 65)
-    print("   Vision Stream Proxy • Internal API Programmatic Control Demo")
-    print("=" * 65)
+    print("=" * 70)
+    print("   Vision Stream Proxy • Granular Permissions & Multi-Source Demo")
+    print("=" * 70)
 
-    # 1. Fetch current status
-    status = get_status()
-    print(f"[*] Server Status     : {status.get('status')}")
-    print(f"[*] Phone Connected   : {status.get('metrics', {}).get('phone_connected')}")
-    print(f"[*] MJPEG Video URL   : {status.get('proxy_urls', {}).get('mjpeg_stream')}")
-    print(f"[*] Live Audio URL    : {status.get('proxy_urls', {}).get('audio_stream_wav')}")
-    print(f"[*] Current Controls  : {status.get('controls')}")
-    print("-" * 65)
+    # 1. Fetch current status & available permission scopes
+    status_code, status = http_request("GET", "/api/status")
+    if status_code == 0:
+        print(f"[!] Unable to connect to server at {SERVER_URL}. Is server running?")
+        print("    Start server with: cd server && python app.py")
+        sys.exit(1)
 
-    # 2. Flashlight (Torch) Control
-    print("[1] Turning Flash ON via Internal API (/api/flash)...")
-    res = call_api("/api/flash", {"enabled": True})
-    print(f"    Response: {res}")
-    time.sleep(2)
+    print(f"[*] Server Status          : {status.get('status')} (HTTP {status_code})")
+    print(f"[*] Active Broadcasters    : {status.get('metrics', {}).get('total_sources', 0)}")
+    print(f"[*] Current Controls       : {status.get('controls')}")
+    print("-" * 70)
 
-    print("[2] Turning Flash OFF via Internal API (/api/flash)...")
-    res = call_api("/api/flash", {"enabled": False})
-    print(f"    Response: {res}")
-    print("-" * 65)
+    # 2. Inspect Permission Scopes and Predefined Roles
+    print("[1] Inspecting Server Permission Scopes & Predefined Roles (/api/auth/permissions)...")
+    _, perms_info = http_request("GET", "/api/auth/permissions")
+    print(f"    Available Scopes: {', '.join(perms_info.get('scopes', []))}")
+    print(f"    Predefined Roles: {list(perms_info.get('roles', {}).keys())}")
+    print("-" * 70)
 
-    # 3. Framerate (FPS) Control (Throttling for energy savings)
-    print("[3] Setting Target Framerate to 15 FPS for low battery consumption (/api/fps)...")
-    res = call_api("/api/fps", {"fps": 15})
-    print(f"    Response: {res}")
+    # 3. Multi-Device Management: Query connected broadcast phones
+    print("[2] Querying Connected Camera Broadcasters (/api/devices)...")
+    _, devices = http_request("GET", "/api/devices")
+    active_id = devices.get("active_source_id")
+    total_sources = devices.get("total_sources", 0)
+    print(f"    Connected Sources: {total_sources}")
+    for idx, src in enumerate(devices.get("sources", [])):
+        is_active = " [PRIMARY]" if src.get("session_id") == active_id else ""
+        print(f"    - Source #{idx + 1}: {src.get('device_model')} ({src.get('client_ip')}) | "
+              f"Frames: {src.get('total_frames')} | FPS: {src.get('fps')}{is_active}")
+    print("-" * 70)
+
+    # 4. Permission Enforcement Demonstration: Viewer Token (Read-Only)
+    # A viewer token has scopes ["stream:video", "stream:audio", "status:read"]
+    # It must SUCCEED for GET /api/status and FAIL (403 Forbidden) for POST /api/flash.
+    viewer_token = "lb_viewer_demo_read_only"
+    print(f"[3] Testing Read-Only Viewer Token: '{viewer_token}'...")
+
+    # Read status with viewer token -> Expected 200 OK
+    code, res = http_request("GET", "/api/status", token=viewer_token)
+    print(f"    GET /api/status -> HTTP {code} (Allowed: {code == 200})")
+
+    # Attempt to toggle Flash with viewer token -> Expected 403 Forbidden
+    code, res = http_request("POST", "/api/flash", payload={"enabled": True}, token=viewer_token)
+    print(f"    POST /api/flash -> HTTP {code} (Blocked as Expected: {code == 403})")
+    if code == 403:
+        print(f"    Access Denied Detail: {res.get('detail')}")
+    print("-" * 70)
+
+    # 5. Permission Enforcement: Controller / Service Token (Hardware Control)
+    service_token = "lb_service_camera_node_01"
+    print(f"[4] Testing Controller/Service Token: '{service_token}'...")
+
+    # Toggle Flashlight
+    print("    - Turning Flashlight ON via /api/flash...")
+    code, res = http_request("POST", "/api/flash", payload={"enabled": True}, token=service_token)
+    print(f"      HTTP {code} Response: {res}")
     time.sleep(1)
 
-    print("[4] Restoring Target Framerate to 30 FPS (/api/fps)...")
-    res = call_api("/api/fps", {"fps": 30})
-    print(f"    Response: {res}")
-    print("-" * 65)
+    print("    - Turning Flashlight OFF via /api/flash...")
+    code, res = http_request("POST", "/api/flash", payload={"enabled": False}, token=service_token)
+    print(f"      HTTP {code} Response: {res}")
 
-    # 4. Compression Quality Control (Wi-Fi bandwidth and battery management)
-    print("[5] Setting Compression Quality to 50% (/api/quality)...")
-    res = call_api("/api/quality", {"quality": 50})
-    print(f"    Response: {res}")
-    time.sleep(1)
+    # Throttle Framerate (FPS)
+    print("    - Setting Framerate to 15 FPS (low power) via /api/fps...")
+    code, res = http_request("POST", "/api/fps", payload={"fps": 15}, token=service_token)
+    print(f"      HTTP {code} Response: {res}")
 
-    print("[6] Restoring Compression Quality to 75% (/api/quality)...")
-    res = call_api("/api/quality", {"quality": 75})
-    print(f"    Response: {res}")
-    print("-" * 65)
+    # Set JPEG Compression Quality
+    print("    - Setting Compression Quality to 65% via /api/quality...")
+    code, res = http_request("POST", "/api/quality", payload={"quality": 65}, token=service_token)
+    print(f"      HTTP {code} Response: {res}")
 
-    # 5. Microphone Audio Transmission Control
-    print("[7] Testing Microphone Audio Control (/api/audio)...")
-    res = call_api("/api/audio", {"enabled": True})
-    print(f"    Response: {res}")
-    print("-" * 65)
+    # Restore default settings
+    print("    - Restoring defaults (30 FPS, 75% Quality) via /api/control...")
+    code, res = http_request(
+        "POST",
+        "/api/control",
+        payload={"fps": 30, "quality": 75, "audio": True, "flash": False},
+        token=service_token
+    )
+    print(f"      HTTP {code} Response: {res}")
+    print("-" * 70)
 
-    # 6. Unified Batch Control Example
-    print("[8] Unified Batch Update (/api/control)...")
-    batch_payload = {
-        "flash": False,
-        "quality": 80,
-        "fps": 25,
-        "audio": True
-    }
-    res = call_api("/api/control", batch_payload)
-    print(f"    Response: {res}")
-    print("=" * 65)
-    print("Demonstration completed successfully.")
+    # 6. Stream URL Token Authentication for OpenCV / VLC
+    print("[5] Media Stream URLs for External Consuming Programs (OpenCV / VLC / FFmpeg):")
+    print(f"    OpenCV Video:  cv2.VideoCapture('{SERVER_URL}/stream/video?token={viewer_token}')")
+    print(f"    VLC / Audio:   {SERVER_URL}/stream/audio?token={viewer_token}")
+    print(f"    Snapshot URI:  {SERVER_URL}/snapshot?token={viewer_token}")
+    print("=" * 70)
+    print("[✓] Demonstration completed successfully.")
 
 
 if __name__ == "__main__":

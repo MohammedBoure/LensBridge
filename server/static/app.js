@@ -50,15 +50,35 @@ let isFlashOn = false;
 let isAudioOn = true;
 let isPlayingAudio = false;
 
+// Auth Token resolution (URL query param or localStorage)
+const urlParams = new URLSearchParams(window.location.search);
+let authToken = urlParams.get('token') || urlParams.get('api_key') || localStorage.getItem('lb_auth_token') || '';
+if (urlParams.get('token')) {
+  localStorage.setItem('lb_auth_token', urlParams.get('token'));
+}
+
+function getAuthQueryString() {
+  return authToken ? `token=${encodeURIComponent(authToken)}` : '';
+}
+
+function apiFetch(endpoint, options = {}) {
+  const headers = options.headers || {};
+  if (authToken) {
+    headers['X-API-Key'] = authToken;
+  }
+  return fetch(endpoint, { ...options, headers });
+}
+
 function populateUrls() {
   const host = window.location.host;
   const protocol = window.location.protocol;
   const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
+  const query = getAuthQueryString() ? `?${getAuthQueryString()}` : '';
 
-  const mjpeg = `${protocol}//${host}/stream/video`;
-  const audio = `${protocol}//${host}/stream/audio`;
-  const wsProxy = `${wsProtocol}//${host}/ws/proxy`;
-  const snap = `${protocol}//${host}/snapshot`;
+  const mjpeg = `${protocol}//${host}/stream/video${query}`;
+  const audio = `${protocol}//${host}/stream/audio${query}`;
+  const wsProxy = `${wsProtocol}//${host}/ws/proxy${query}`;
+  const snap = `${protocol}//${host}/snapshot${query}`;
 
   mjpegInput.value = mjpeg;
   if (audioInput) audioInput.value = audio;
@@ -69,7 +89,8 @@ function populateUrls() {
 
 function initWebSocket() {
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${wsProtocol}//${window.location.host}/ws/proxy`;
+  const query = getAuthQueryString() ? `?${getAuthQueryString()}` : '';
+  const url = `${wsProtocol}//${window.location.host}/ws/proxy${query}`;
 
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
@@ -177,7 +198,7 @@ async function toggleFlash() {
   const next = !isFlashOn;
   updateFlashUI(next);
   try {
-    await fetch('/api/flash', {
+    await apiFetch('/api/flash', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: next }),
@@ -191,7 +212,7 @@ async function toggleAudio() {
   const next = !isAudioOn;
   updateAudioUI(next);
   try {
-    await fetch('/api/audio', {
+    await apiFetch('/api/audio', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: next }),
@@ -203,7 +224,7 @@ async function toggleAudio() {
 
 async function changeFps(val) {
   try {
-    await fetch('/api/fps', {
+    await apiFetch('/api/fps', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fps: parseInt(val, 10) }),
@@ -215,7 +236,7 @@ async function changeFps(val) {
 
 async function changeQuality(val) {
   try {
-    await fetch('/api/quality', {
+    await apiFetch('/api/quality', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ quality: parseInt(val, 10) }),
@@ -227,7 +248,8 @@ async function changeQuality(val) {
 
 function toggleBrowserAudioPlayback() {
   if (!isPlayingAudio) {
-    browserAudioPlayer.src = `/stream/audio?format=wav&t=${Date.now()}`;
+    const tokenParam = authToken ? `&token=${encodeURIComponent(authToken)}` : '';
+    browserAudioPlayer.src = `/stream/audio?format=wav&t=${Date.now()}${tokenParam}`;
     browserAudioPlayer.play().then(() => {
       isPlayingAudio = true;
       listenAudioText.textContent = 'Mute Browser Audio';

@@ -28,3 +28,6 @@ mobile/android/gradleBuild/
 Thumbs.db
 *.log
 *.pid
+permissions.json
+server/permissions.json
+

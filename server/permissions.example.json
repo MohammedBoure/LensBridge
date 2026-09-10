@@ -1,0 +1,33 @@
+{
+  "auth_enabled": true,
+  "allow_local_loopback_bypass": false,
+  "tokens": {
+    "your-admin-token-here": {
+      "id": "tok_admin_example",
+      "token": "your-admin-token-here",
+      "name": "System Administrator",
+      "role": "admin",
+      "permissions": ["*"],
+      "created_at": "2026-09-10 12:00:00",
+      "description": "Unrestricted administrative access"
+    },
+    "your-operator-token-here": {
+      "id": "tok_operator_example",
+      "token": "your-operator-token-here",
+      "name": "Internal Service",
+      "role": "operator",
+      "permissions": ["control:*", "stream:*", "status:read"],
+      "created_at": "2026-09-10 12:00:00",
+      "description": "Hardware control and stream consumption"
+    },
+    "your-viewer-token-here": {
+      "id": "tok_viewer_example",
+      "token": "your-viewer-token-here",
+      "name": "VLC / OpenCV Media Viewer",
+      "role": "viewer",
+      "permissions": ["stream:*", "status:read"],
+      "created_at": "2026-09-10 12:00:00",
+      "description": "Read-only access for video & audio streaming"
+    }
+  }
+}

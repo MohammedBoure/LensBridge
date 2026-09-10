@@ -87,20 +87,35 @@ http://<IP>:8765/snapshot                                      POST /api/quality
    - **Adaptive Discovery**: Uses 8 rapid UDP bursts on connection events and relaxes to deep 12s standby sleep when offline to save 90% idle battery.
    - **24/7 Background Persistence & Boot Auto-Start**: Holds Android Foreground Service (`camera|dataSync|microphone`), auto-restarts on phone boot (`BOOT_COMPLETED`), revives via `AlarmManager` if swiped from recent apps, and supports one-tap battery optimization whitelist.
 
+6. **Multi-Broadcaster Resilience & Seamless Failover**:
+   - **Concurrent Broadcasters**: Supports multiple mobile phones transmitting back-camera feeds and microphone audio concurrently (`/ws/phone`).
+   - **Session-Based Isolation**: Each connection gets a unique session ID. Rapid disconnect/reconnect loops do not cause race conditions where an old socket tears down a new session.
+   - **Seamless Auto-Failover**: If the active broadcaster disconnects, the server automatically fails over to the next connected broadcaster without dropping subscriber connections (OpenCV, VLC, web clients).
+   - **Broadcaster Selection**: Programmatically inspect connected devices via `GET /api/devices` and switch active cameras via `POST /api/devices/select`.
+
+7. **Granular Internal API Permissions & Access Control**:
+   - **Fine-Grained Scopes**: `control:flash`, `control:fps`, `control:quality`, `control:audio`, `control:*`, `stream:video`, `stream:audio`, `status:read`, `admin`, `*`.
+   - **Predefined Roles**: `admin`, `operator`, `viewer`, `controller`.
+   - **Flexible Token Formats**: Accepts `X-API-Key` header, `Authorization: Bearer <token>`, and query parameters (`?token=<token>`) for seamless integration with OpenCV and HTML media tags.
+   - **Secret Isolation**: Stored in `server/permissions.json` which is ignored in version control, with `permissions.example.json` provided as template.
+
 ---
 
 ## Directory Structure
 
 - **`server/`**: Desktop program, reverse proxy engine, UDP discovery, and viewer.
-  - **`config.py`**: Port settings (`8765` HTTP, `45454` UDP), default audio/video parameters.
+  - **`config.py`**: Port settings (`8765` HTTP, `45454` UDP), auth toggles, and multi-broadcast limits.
+  - **`auth.py`**: Token authentication and role-based permissions engine with granular scope verification.
+  - **`permissions.example.json`**: Template for role-based token configuration isolated from git commits.
   - **`discovery.py`**: UDP discovery responder on port `45454`.
-  - **`stream_hub.py`**: Central video & audio proxy broker with bidirectional control dispatch.
-  - **`app.py`**: FastAPI server exposing video/audio proxy endpoints and internal hardware control APIs.
-  - **`desktop_gui.py`**: Native PySide6 desktop GUI with video feed, hardware control buttons, and copyable URLs.
-  - **`client_example.py`**: Complete Python demonstration script for the Internal API and streams.
+  - **`stream_hub.py`**: Central proxy engine with multi-broadcaster session management and automatic failover.
+  - **`app.py`**: FastAPI server exposing video/audio proxy endpoints, device selection, and secured internal APIs.
+  - **`desktop_gui.py`**: Native PySide6 desktop GUI with video feed, device selection dropdown, hardware controls, and token URLs.
+  - **`client_example.py`**: Python demonstration script showing token permissions, multi-device queries, and hardware controls.
+  - **`test_resilience_and_permissions.py`**: Automated unit and integration test suite for multi-broadcaster failover and permissions.
   - **`main.py`**: Main entry point launching discovery, Uvicorn backend, and desktop GUI.
   - **`service_main.py`**: Headless background service daemon for 24/7 invisible execution.
-  - **`static/`**: Modern web dashboard with in-browser video, audio player, and control toggles.
+  - **`static/`**: Modern web dashboard with in-browser video, audio player, token support, and control toggles.
 - **`mobile/`**: Flutter mobile application.
   - **`lib/`**: Flutter UI, IP/port settings, and stream controllers.
   - **`android/`**: Native Android layer (`DualCameraManager.kt`, `AudioStreamManager.kt`, `BackgroundStreamService.kt`).
@@ -110,22 +125,27 @@ http://<IP>:8765/snapshot                                      POST /api/quality
 
 ## Internal REST API Reference
 
-| Endpoint | Method | Payload / Params | Description |
+| Endpoint | Method | Required Scope | Description |
 |---|---|---|---|
-| `/api/flash` | `POST` | `{"enabled": true}` or `?enabled=true` | Turn phone camera flash ON or OFF |
-| `/api/flash` | `GET` | None | Get current flash state |
-| `/api/fps` | `POST` | `{"fps": 15}` or `?fps=15` | Set target framerate (1 - 60 FPS) |
-| `/api/fps` | `GET` | None | Get current target framerate |
-| `/api/quality` | `POST` | `{"quality": 60}` or `?quality=60` | Set JPEG compression quality (10 - 100) |
-| `/api/quality` | `GET` | None | Get current JPEG quality |
-| `/api/audio` | `POST` | `{"enabled": true}` or `?enabled=true` | Enable or mute microphone audio |
-| `/api/audio` | `GET` | None | Get audio status and metrics |
-| `/api/control` | `POST` | `{"flash": true, "fps": 15, "quality": 70, "audio": true}` | Batch update multiple hardware settings |
-| `/api/control` | `GET` | None | Get all current control settings |
-| `/api/status` | `GET` | None | Get complete server status, URLs, and telemetry |
-| `/stream/video` | `GET` | None | MJPEG video stream (OpenCV, VLC, FFmpeg) |
-| `/stream/audio` | `GET` | `?format=wav` or `?format=pcm` | Live microphone audio stream |
-| `/snapshot` | `GET` | None | Single JPEG frame snapshot |
+| `/api/flash` | `POST` | `control:flash` | Turn phone camera flash ON or OFF |
+| `/api/flash` | `GET` | `status:read` | Get current flash state |
+| `/api/fps` | `POST` | `control:fps` | Set target framerate (1 - 60 FPS) |
+| `/api/fps` | `GET` | `status:read` | Get current target framerate |
+| `/api/quality` | `POST` | `control:quality` | Set JPEG compression quality (10 - 100) |
+| `/api/quality` | `GET` | `status:read` | Get current JPEG quality |
+| `/api/audio` | `POST` | `control:audio` | Enable or mute microphone audio |
+| `/api/audio` | `GET` | `status:read` | Get audio status and metrics |
+| `/api/control` | `POST` | `control:*` | Batch update multiple hardware settings |
+| `/api/control` | `GET` | `status:read` | Get all current control settings |
+| `/api/devices` | `GET` | `status:read` | List connected broadcast sources & telemetry |
+| `/api/devices/select` | `POST` | `control:*` | Switch active primary camera source |
+| `/api/auth/permissions` | `GET` | None | List available scopes and predefined roles |
+| `/api/auth/tokens` | `GET` | `admin` | List active authentication tokens (masked) |
+| `/api/auth/tokens` | `POST` | `admin` | Generate new API access token with assigned role |
+| `/api/status` | `GET` | `status:read` | Get complete server status, URLs, and telemetry |
+| `/stream/video` | `GET` | `stream:video` | MJPEG video stream (supports `?token=...`) |
+| `/stream/audio` | `GET` | `stream:audio` | Live microphone audio stream (supports `?token=...`) |
+| `/snapshot` | `GET` | `stream:video` | Single JPEG frame snapshot (supports `?token=...`) |
 
 ---
 
