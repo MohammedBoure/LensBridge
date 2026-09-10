@@ -39,11 +39,21 @@ class DualCameraManager(private val context: Context) {
     var frontCameraId: String? = null
         private set
 
+    var isFlashAvailable: Boolean = false
+        private set
+    var isFlashOn: Boolean = false
+        private set
+    var currentJpegQuality: Int = 75
+        private set
+    var targetFps: Int = 30
+        private set
+
     private var rearCameraDevice: CameraDevice? = null
     private var frontCameraDevice: CameraDevice? = null
 
     private var rearCaptureSession: CameraCaptureSession? = null
     private var frontCaptureSession: CameraCaptureSession? = null
+    private var rearRequestBuilder: CaptureRequest.Builder? = null
 
     private var rearImageReader: ImageReader? = null
     private var frontImageReader: ImageReader? = null
@@ -54,6 +64,7 @@ class DualCameraManager(private val context: Context) {
     private var frameListener: FrameListener? = null
     private var stateListener: StateListener? = null
     private var isRunning = false
+    private var lastRearFrameTimeNs: Long = 0L
 
     init {
         detectCameraIds()
@@ -65,8 +76,10 @@ class DualCameraManager(private val context: Context) {
                 try {
                     val characteristics = cameraManager.getCameraCharacteristics(id)
                     val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                    val hasFlash = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
                     if (facing == CameraCharacteristics.LENS_FACING_BACK && rearCameraId == null) {
                         rearCameraId = id
+                        isFlashAvailable = hasFlash
                     } else if (facing == CameraCharacteristics.LENS_FACING_FRONT && frontCameraId == null) {
                         frontCameraId = id
                     }
@@ -74,7 +87,7 @@ class DualCameraManager(private val context: Context) {
                     Log.w(TAG, "Unable to inspect camera ID $id: ${e.message}")
                 }
             }
-            Log.d(TAG, "Detected camera IDs -> Rear: $rearCameraId, Front: $frontCameraId")
+            Log.d(TAG, "Detected camera IDs -> Rear: $rearCameraId (Flash: $isFlashAvailable), Front: $frontCameraId")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to query camera list", e)
         }
@@ -234,7 +247,19 @@ class DualCameraManager(private val context: Context) {
             val captureRequestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(surface)
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                set(CaptureRequest.JPEG_QUALITY, 75.toByte())
+                set(CaptureRequest.JPEG_QUALITY, currentJpegQuality.toByte())
+                if (isRear) {
+                    if (isFlashOn) {
+                        set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                    } else {
+                        set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                    }
+                }
+            }
+
+            if (isRear) {
+                rearRequestBuilder = captureRequestBuilder
             }
 
             val sessionCallback = object : CameraCaptureSession.StateCallback() {
@@ -275,6 +300,78 @@ class DualCameraManager(private val context: Context) {
         }
     }
 
+    /**
+     * Programmatically turns the rear camera flash on or off with zero interruption to the video stream.
+     * Uses the active capture session to update the repeating request instantly with lowest energy consumption.
+     */
+    fun setTorch(enabled: Boolean): Boolean {
+        isFlashOn = enabled
+        val session = rearCaptureSession
+        val builder = rearRequestBuilder
+        val handler = backgroundHandler
+
+        if (session != null && builder != null && handler != null) {
+            return try {
+                if (enabled) {
+                    builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                    builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                } else {
+                    builder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                }
+                session.setRepeatingRequest(builder.build(), null, handler)
+                Log.d(TAG, "Torch switched ${if (enabled) "ON" else "OFF"} in active session")
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed updating torch in session: ${e.message}")
+                false
+            }
+        } else if (rearCameraId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            return try {
+                cameraManager.setTorchMode(rearCameraId!!, enabled)
+                Log.d(TAG, "Torch set via CameraManager fallback: $enabled")
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed setTorchMode fallback: ${e.message}")
+                false
+            }
+        }
+        return false
+    }
+
+    /**
+     * Dynamically adjusts hardware JPEG compression quality (10 - 100).
+     * Lower quality drastically reduces Wi-Fi transmission power and saves battery.
+     */
+    fun setJpegQuality(quality: Int): Boolean {
+        val clamped = quality.coerceIn(10, 100)
+        currentJpegQuality = clamped
+        val session = rearCaptureSession
+        val builder = rearRequestBuilder
+        val handler = backgroundHandler
+
+        if (session != null && builder != null && handler != null) {
+            return try {
+                builder.set(CaptureRequest.JPEG_QUALITY, clamped.toByte())
+                session.setRepeatingRequest(builder.build(), null, handler)
+                Log.d(TAG, "JPEG quality dynamically set to $clamped%")
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed updating JPEG quality: ${e.message}")
+                false
+            }
+        }
+        return true
+    }
+
+    /**
+     * Programmatically sets the target frame rate (1 - 60 FPS).
+     * High-speed native frame throttling prevents unnecessary allocations and radio transmission.
+     */
+    fun setTargetFps(fps: Int) {
+        targetFps = fps.coerceIn(1, 60)
+        Log.d(TAG, "Target FPS throttler configured to $targetFps FPS")
+    }
+
     private fun processImage(reader: ImageReader, cameraCode: Byte) {
         val image = try {
             reader.acquireLatestImage()
@@ -283,6 +380,16 @@ class DualCameraManager(private val context: Context) {
         } ?: return
 
         try {
+            // High-efficiency frame-rate throttling: drops extra frames BEFORE buffer extraction
+            if (cameraCode == CAMERA_REAR && targetFps < 60) {
+                val minIntervalNs = 1_000_000_000L / targetFps
+                val nowNs = System.nanoTime()
+                if (nowNs - lastRearFrameTimeNs < minIntervalNs) {
+                    return
+                }
+                lastRearFrameTimeNs = nowNs
+            }
+
             val planes = image.planes
             if (planes.isNotEmpty()) {
                 val buffer: ByteBuffer = planes[0].buffer
@@ -300,6 +407,11 @@ class DualCameraManager(private val context: Context) {
     @Synchronized
     fun stopStreaming() {
         isRunning = false
+        if (isFlashOn) {
+            try {
+                setTorch(false)
+            } catch (_: Exception) {}
+        }
         try {
             rearCaptureSession?.close()
             frontCaptureSession?.close()
@@ -312,10 +424,12 @@ class DualCameraManager(private val context: Context) {
         } finally {
             rearCaptureSession = null
             frontCaptureSession = null
+            rearRequestBuilder = null
             rearCameraDevice = null
             frontCameraDevice = null
             rearImageReader = null
             frontImageReader = null
+            isFlashOn = false
         }
         stopBackgroundThread()
     }

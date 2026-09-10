@@ -111,6 +111,7 @@ class MainActivity : FlutterActivity() {
     private fun requestAppPermissions() {
         val permissions = mutableListOf(
             Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO,
             Manifest.permission.ACCESS_NETWORK_STATE,
             Manifest.permission.ACCESS_WIFI_STATE
         )

@@ -1,6 +1,7 @@
 /**
  * Vision Core Live Dashboard & Proxy Client
- * Receives the back-camera feed and displays copyable stream endpoints.
+ * Receives the back-camera video and microphone audio stream,
+ * provides copyable proxy endpoints, and programmatic hardware controls.
  */
 
 const videoCanvas = document.getElementById('videoCanvas');
@@ -16,11 +17,24 @@ const bitrateText = document.getElementById('bitrateText');
 const resText = document.getElementById('resolutionText');
 const deviceModelText = document.getElementById('deviceModelText');
 const totalFramesText = document.getElementById('totalFramesText');
+const audioStatBadge = document.getElementById('audioStatBadge');
+
+// Control elements
+const flashBtn = document.getElementById('flashBtn');
+const flashBtnText = document.getElementById('flashBtnText');
+const audioBtn = document.getElementById('audioBtn');
+const audioBtnText = document.getElementById('audioBtnText');
+const fpsSelect = document.getElementById('fpsSelect');
+const qualitySlider = document.getElementById('qualitySlider');
+const qualityVal = document.getElementById('qualityVal');
 
 const mjpegInput = document.getElementById('mjpegUrl');
+const audioInput = document.getElementById('audioUrl');
 const wsInput = document.getElementById('wsUrl');
 const snapInput = document.getElementById('snapUrl');
-const codeMjpegUrl = document.getElementById('codeMjpegUrl');
+const browserAudioPlayer = document.getElementById('browserAudioPlayer');
+const listenAudioBtn = document.getElementById('listenAudioBtn');
+const listenAudioText = document.getElementById('listenAudioText');
 
 let totalFrames = 0;
 let ws = null;
@@ -31,19 +45,25 @@ let frameCount = 0;
 let byteCount = 0;
 let lastCheck = performance.now();
 
+// State
+let isFlashOn = false;
+let isAudioOn = true;
+let isPlayingAudio = false;
+
 function populateUrls() {
   const host = window.location.host;
   const protocol = window.location.protocol;
   const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
 
   const mjpeg = `${protocol}//${host}/stream/video`;
+  const audio = `${protocol}//${host}/stream/audio`;
   const wsProxy = `${wsProtocol}//${host}/ws/proxy`;
   const snap = `${protocol}//${host}/snapshot`;
 
   mjpegInput.value = mjpeg;
+  if (audioInput) audioInput.value = audio;
   wsInput.value = wsProxy;
   snapInput.value = snap;
-  if (codeMjpegUrl) codeMjpegUrl.textContent = mjpeg;
   serverIpDisplay.textContent = host;
 }
 
@@ -86,19 +106,145 @@ function initWebSocket() {
 }
 
 function handleControlMessage(data) {
-  if (data.type === 'PHONE_CONNECTED' || data.type === 'DEVICE_INFO_UPDATED') {
+  if (data.type === 'PHONE_CONNECTED' || data.type === 'DEVICE_INFO_UPDATED' || data.type === 'PHONE_STATE_SYNC') {
     const info = data.phone_info || {};
     phoneDot.className = 'status-dot green';
     phoneStatusDisplay.textContent = `Connected (${info.ip || 'Wi-Fi'})`;
     deviceModelText.textContent = `${info.device_model || 'Mobile Device'}`;
+
+    if (data.controls) {
+      syncControlsUI(data.controls);
+    }
   } else if (data.type === 'PHONE_DISCONNECTED') {
     phoneDot.className = 'status-dot red';
     phoneStatusDisplay.textContent = 'Phone Disconnected';
     deviceModelText.textContent = 'Waiting...';
     overlay.classList.remove('hidden');
     fpsText.textContent = '0.0';
+  } else if (data.type === 'CONTROL_UPDATED') {
+    if (data.control === 'flash') updateFlashUI(data.enabled);
+    if (data.control === 'audio') updateAudioUI(data.enabled);
+    if (data.control === 'quality') updateQualityUI(data.quality);
+    if (data.control === 'fps') updateFpsUI(data.fps);
   }
 }
+
+function syncControlsUI(controls) {
+  if (controls.flash_enabled !== undefined) updateFlashUI(controls.flash_enabled);
+  if (controls.audio_enabled !== undefined) updateAudioUI(controls.audio_enabled);
+  if (controls.quality !== undefined) updateQualityUI(controls.quality);
+  if (controls.fps !== undefined) updateFpsUI(controls.fps);
+}
+
+function updateFlashUI(enabled) {
+  isFlashOn = Boolean(enabled);
+  if (isFlashOn) {
+    flashBtn.classList.add('flash-on');
+    flashBtnText.textContent = 'Flash: ON';
+  } else {
+    flashBtn.classList.remove('flash-on');
+    flashBtnText.textContent = 'Flash: OFF';
+  }
+}
+
+function updateAudioUI(enabled) {
+  isAudioOn = Boolean(enabled);
+  if (isAudioOn) {
+    audioBtn.className = 'btn-control btn-audio-active';
+    audioBtnText.textContent = 'Microphone: ON';
+    audioStatBadge.textContent = '🎤 Audio: Active';
+    audioStatBadge.style.color = 'var(--accent-cyan)';
+  } else {
+    audioBtn.className = 'btn-control btn-audio-muted';
+    audioBtnText.textContent = 'Microphone: MUTED';
+    audioStatBadge.textContent = '🎤 Audio: Muted';
+    audioStatBadge.style.color = '#ef4444';
+  }
+}
+
+function updateQualityUI(quality) {
+  qualitySlider.value = quality;
+  qualityVal.textContent = `${quality}%`;
+}
+
+function updateFpsUI(fps) {
+  fpsSelect.value = String(fps);
+}
+
+// ---------------- Remote Control Actions ---------------- //
+
+async function toggleFlash() {
+  const next = !isFlashOn;
+  updateFlashUI(next);
+  try {
+    await fetch('/api/flash', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    });
+  } catch (e) {
+    console.error('Failed toggling flash:', e);
+  }
+}
+
+async function toggleAudio() {
+  const next = !isAudioOn;
+  updateAudioUI(next);
+  try {
+    await fetch('/api/audio', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    });
+  } catch (e) {
+    console.error('Failed toggling audio:', e);
+  }
+}
+
+async function changeFps(val) {
+  try {
+    await fetch('/api/fps', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fps: parseInt(val, 10) }),
+    });
+  } catch (e) {
+    console.error('Failed setting FPS:', e);
+  }
+}
+
+async function changeQuality(val) {
+  try {
+    await fetch('/api/quality', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quality: parseInt(val, 10) }),
+    });
+  } catch (e) {
+    console.error('Failed setting quality:', e);
+  }
+}
+
+function toggleBrowserAudioPlayback() {
+  if (!isPlayingAudio) {
+    browserAudioPlayer.src = `/stream/audio?format=wav&t=${Date.now()}`;
+    browserAudioPlayer.play().then(() => {
+      isPlayingAudio = true;
+      listenAudioText.textContent = 'Mute Browser Audio';
+      listenAudioBtn.style.background = '#065f46';
+    }).catch((err) => {
+      console.warn('Audio play request failed:', err);
+    });
+  } else {
+    browserAudioPlayer.pause();
+    browserAudioPlayer.src = '';
+    isPlayingAudio = false;
+    listenAudioText.textContent = 'Listen in Browser';
+    listenAudioBtn.style.background = '';
+  }
+}
+
+// ---------------- Video Processing ---------------- //
 
 async function handleBinaryFrame(arrayBuffer) {
   if (arrayBuffer.byteLength < 4) return;

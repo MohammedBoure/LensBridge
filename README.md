@@ -1,8 +1,12 @@
-# Vision • Mobile Camera Background Stream & Desktop Reverse Proxy System
+# Vision • Mobile Camera & Microphone Proxy with Remote Hardware Control
 
-A complete end-to-end streaming solution that captures the phone's **back (rear) camera** in the background, streams it continuously over local Wi-Fi, and converts the stream on the desktop server into a **reverse proxy stream** for external and internal programs (e.g., OpenCV, AI pipelines, VLC, custom software).
+A complete end-to-end streaming and hardware control solution that captures the phone's **back (rear) camera** and **microphone audio** in the background, streams them continuously over local Wi-Fi, and converts them on the desktop server into **reverse proxy streams** for internal programs (OpenCV, AI pipelines, VLC, custom software).
 
-The mobile app runs 24/7 as an Android Foreground Service with `WakeLock`/`WifiLock`, and the desktop server remains active continuously, ready to respond to discovery searches from the phone at any moment.
+Features a bidirectional real-time control system and **Internal REST API** allowing external programs to programmatically control hardware features from the server:
+- **Flash / Torch**: Turn ON or OFF on demand with lowest energy consumption.
+- **Framerate (FPS)**: Throttled programmatically to maximize battery life and minimize Wi-Fi energy.
+- **Compression Quality**: Dynamically adjusted (10-100%) to optimize bandwidth and power.
+- **Microphone Audio**: Streamed live (WAV / PCM / WebSocket) and remotely enabled or suspended.
 
 ---
 
@@ -12,12 +16,14 @@ The mobile app runs 24/7 as an Android Foreground Service with `WakeLock`/`WifiL
                        +-----------------------------------+
                        |    Phone (Mobile Flutter App)     |
                        | - Back (Rear) Camera Streamer     |
-                       | - Fault-Tolerant Camera2 Engine   |
+                       | - 16kHz PCM Microphone Streamer   |
+                       | - Hardware Flash / Torch Control  |
+                       | - Dynamic Quality & FPS Throttler |
                        | - Background Foreground Service   |
                        | - WakeLock + High-Perf WifiLock   |
                        +-----------------+-----------------+
                                          |
-                       UDP Probe (45454) | (Auto-Discovery)
+                       UDP Probe (45454) | (Auto-Discovery & Bidirectional WebSocket)
                                          v
 +-------------------------------------------------------------------------+
 |                      Local Wi-Fi Network Subnet                         |
@@ -28,17 +34,20 @@ The mobile app runs 24/7 as an Android Foreground Service with `WakeLock`/`WifiL
                        +-----------------+-----------------+
                        |    Vision Desktop Server & Proxy  |
                        | - Always-On UDP Discovery Listener|
-                       | - Back-Camera Stream Ingestion    |
+                       | - Video & Audio Stream Ingestion  |
+                       | - Programmatic Control Dispatcher |
                        | - Native PySide6 GUI Monitor      |
                        +-----------------+-----------------+
                                          |
-               +-------------------------+-------------------------+
-               |                         |                         |
-               v                         v                         v
-     [ HTTP MJPEG Proxy ]      [ WebSocket Proxy ]      [ Single Snapshot ]
-   http://<IP>:8765/stream/video  ws://<IP>:8765/ws/proxy   http://<IP>:8765/snapshot
-               |                         |                         |
-               +-------------------------+-------------------------+
+         +-------------------------------+-------------------------------+
+         |                               |                               |
+         v                               v                               v
+[ HTTP MJPEG Video ]           [ HTTP Audio (WAV/PCM) ]        [ Internal Control API ]
+http://<IP>:8765/stream/video  http://<IP>:8765/stream/audio   POST /api/flash
+ws://<IP>:8765/ws/proxy        ws://<IP>:8765/ws/audio         POST /api/fps
+http://<IP>:8765/snapshot                                      POST /api/quality
+                                                               POST /api/audio
+                                                               POST /api/control
                                          |
                                          v
                       +--------------------------------------+
@@ -46,7 +55,8 @@ The mobile app runs 24/7 as an Android Foreground Service with `WakeLock`/`WifiL
                       | - OpenCV (cv2.VideoCapture)          |
                       | - AI / ML Vision Inference Pipelines |
                       | - VLC / Media Players / FFmpeg       |
-                      | - Custom Internal Software / Tools   |
+                      | - Audio Recorders / Transcribers     |
+                      | - Custom Internal Software / Scripts |
                       +--------------------------------------+
 ```
 
@@ -54,40 +64,66 @@ The mobile app runs 24/7 as an Android Foreground Service with `WakeLock`/`WifiL
 
 ## Key Features
 
-1. **Back-Camera Streaming & Fault Isolation**:
-   - Focuses exclusively on the phone's back camera for optimal throughput and clarity.
-   - Fault-tolerant hardware engine: if the front camera is broken, the app isolates the error and runs in "Back Camera Only" mode without freezing or crashing.
+1. **Remote Flashlight (Torch) Control via Internal API**:
+   - Turn the rear camera flash ON or OFF programmatically from the server using `POST /api/flash`.
+   - Modifies repeating requests on the active Camera2 capture session with **zero video interruption**, **zero camera recreation**, and **least energy consumption**.
 
-2. **Reverse / Proxy Stream for Internal Programs**:
-   - **HTTP MJPEG Stream** (`http://127.0.0.1:8765/stream/video` or `/video_feed`): Zero-configuration stream compatible with OpenCV `cv2.VideoCapture`, VLC, FFmpeg, and browsers.
-   - **Low-Latency WebSocket Proxy** (`ws://127.0.0.1:8765/ws/proxy`): Sub-10ms direct binary JPEG stream.
-   - **Snapshot API** (`http://127.0.0.1:8765/snapshot`): High-speed single-frame capture for image analysis scripts.
+2. **Microphone Audio Transmission**:
+   - Captures microphone audio as 16-bit Mono PCM at 16,000 Hz.
+   - Zero software compression overhead, ensuring negligible CPU usage and maximum battery stability.
+   - Consumable via `http://<IP>:8765/stream/audio?format=wav` (VLC / browsers / FFmpeg) or `ws://<IP>:8765/ws/audio`.
+   - Remotely controllable via `POST /api/audio` to suspend microphone polling when not needed.
 
-3. **24/7 Always-On Server & On-Demand Discovery**:
-   - Desktop backend runs continuously without stopping. If the phone disconnects or switches networks, the server stays online waiting for the next connection.
-   - UDP discovery service binds on port `45454`, replying to phone searches the instant broadcast is started.
+3. **Programmatic Quality & Number of Frames (FPS) Control**:
+   - **Target FPS**: Set via `POST /api/fps` (e.g. 5, 10, 15, 30 FPS). High-speed native frame throttling skips unnecessary buffer extraction, saving up to 80% of Wi-Fi radio power.
+   - **Quality**: Set via `POST /api/quality` (10 - 100%). Dynamically adjusts hardware JPEG compression to reduce packet sizes and bandwidth.
 
-4. **Continuous Background Operation on Phone**:
-   - Android Foreground Service with persistent notification.
-   - Holds `WakeLock` and `WifiLock` so transmission continues even when the screen is turned off or apps are switched.
+4. **Internal REST API for Other Programs**:
+   - Fully documented REST endpoints allowing any internal or external program (Python, C++, Node.js, cURL) to command the mobile client programmatically.
+
+5. **24/7 Always-On Reliability & Background Service**:
+   - Android Foreground Service with `camera|dataSync|microphone` types.
+   - Holds `WakeLock` and `WifiLock` so transmission continues when the phone screen is turned off.
 
 ---
 
 ## Directory Structure
 
 - **`server/`**: Desktop program, reverse proxy engine, UDP discovery, and viewer.
-  - **`config.py`**: Port settings (`8765` HTTP, `45454` UDP), IP detection, and parameters.
+  - **`config.py`**: Port settings (`8765` HTTP, `45454` UDP), default audio/video parameters.
   - **`discovery.py`**: UDP discovery responder on port `45454`.
-  - **`stream_hub.py`**: Central back-camera stream proxy broker with queue-based MJPEG pub/sub.
-  - **`app.py`**: FastAPI application exposing `/stream/video`, `/ws/proxy`, `/snapshot`, and `/ws/phone`.
-  - **`desktop_gui.py`**: PySide6 desktop monitor with live video feed and proxy URLs.
-  - **`main.py`**: Main entry point launching backend, discovery, and desktop monitor.
-  - **`run_server.bat`**: Double-clickable Windows batch launcher.
-  - **`static/`**: Web dashboard assets for browser viewing.
+  - **`stream_hub.py`**: Central video & audio proxy broker with bidirectional control dispatch.
+  - **`app.py`**: FastAPI server exposing video/audio proxy endpoints and internal hardware control APIs.
+  - **`desktop_gui.py`**: Native PySide6 desktop GUI with video feed, hardware control buttons, and copyable URLs.
+  - **`client_example.py`**: Complete Python demonstration script for the Internal API and streams.
+  - **`main.py`**: Main entry point launching discovery, Uvicorn backend, and desktop GUI.
+  - **`service_main.py`**: Headless background service daemon for 24/7 invisible execution.
+  - **`static/`**: Modern web dashboard with in-browser video, audio player, and control toggles.
 - **`mobile/`**: Flutter mobile application.
   - **`lib/`**: Flutter UI, IP/port settings, and stream controllers.
-  - **`android/`**: Native Android layer (`DualCameraManager.kt`, `BackgroundStreamService.kt`).
+  - **`android/`**: Native Android layer (`DualCameraManager.kt`, `AudioStreamManager.kt`, `BackgroundStreamService.kt`).
   - **`pubspec.yaml`**: Flutter package configuration.
+
+---
+
+## Internal REST API Reference
+
+| Endpoint | Method | Payload / Params | Description |
+|---|---|---|---|
+| `/api/flash` | `POST` | `{"enabled": true}` or `?enabled=true` | Turn phone camera flash ON or OFF |
+| `/api/flash` | `GET` | None | Get current flash state |
+| `/api/fps` | `POST` | `{"fps": 15}` or `?fps=15` | Set target framerate (1 - 60 FPS) |
+| `/api/fps` | `GET` | None | Get current target framerate |
+| `/api/quality` | `POST` | `{"quality": 60}` or `?quality=60` | Set JPEG compression quality (10 - 100) |
+| `/api/quality` | `GET` | None | Get current JPEG quality |
+| `/api/audio` | `POST` | `{"enabled": true}` or `?enabled=true` | Enable or mute microphone audio |
+| `/api/audio` | `GET` | None | Get audio status and metrics |
+| `/api/control` | `POST` | `{"flash": true, "fps": 15, "quality": 70, "audio": true}` | Batch update multiple hardware settings |
+| `/api/control` | `GET` | None | Get all current control settings |
+| `/api/status` | `GET` | None | Get complete server status, URLs, and telemetry |
+| `/stream/video` | `GET` | None | MJPEG video stream (OpenCV, VLC, FFmpeg) |
+| `/stream/audio` | `GET` | `?format=wav` or `?format=pcm` | Live microphone audio stream |
+| `/snapshot` | `GET` | None | Single JPEG frame snapshot |
 
 ---
 
@@ -99,51 +135,37 @@ Double-click `server/run_server.bat` or run from PowerShell:
 
 ```powershell
 cd server
-py main.py
+venv\Scripts\python.exe main.py
 ```
 
-The desktop program will display:
-- Live back camera feed.
-- Ready-to-copy proxy URLs for MJPEG, WebSocket, and Snapshot.
-- UDP discovery active on port `45454`.
-
-### 2. Connect from Another Internal Program (OpenCV)
+### 2. Connect and Control via Python Internal API
 
 ```python
+import requests
 import cv2
 
-# Connect to the local proxy MJPEG stream
-cap = cv2.VideoCapture("http://127.0.0.1:8765/stream/video")
+# Control hardware via Internal API
+requests.post("http://127.0.0.1:8765/api/flash", json={"enabled": True})  # Turn flash ON
+requests.post("http://127.0.0.1:8765/api/fps", json={"fps": 15})          # Set 15 FPS (low battery)
+requests.post("http://127.0.0.1:8765/api/quality", json={"quality": 60})  # Set 60% quality
 
+# Stream video with OpenCV
+cap = cv2.VideoCapture("http://127.0.0.1:8765/stream/video")
 while True:
     ret, frame = cap.read()
-    if not ret:
-        continue
-    
-    cv2.imshow("Back Camera Live Proxy", frame)
-    if cv2.waitKey(1) == 27: # ESC key to exit
+    if ret:
+        cv2.imshow("Back Camera Live", frame)
+    if cv2.waitKey(1) == 27:
         break
-
 cap.release()
 cv2.destroyAllWindows()
 ```
 
-### 3. Running as a 24/7 Windows Background Service
-
-To run the server continuously in the background without keeping any console windows open (starts automatically on Windows boot):
-
-1. **Install Service**: Double-click [`server/install_service.bat`](file:///C:/Users/moham/Desktop/vision/server/install_service.bat)
-2. **Check Status**: Double-click [`server/status_service.bat`](file:///C:/Users/moham/Desktop/vision/server/status_service.bat)
-3. **Stop Service**: Double-click [`server/stop_service.bat`](file:///C:/Users/moham/Desktop/vision/server/stop_service.bat)
-4. **Start Service**: Double-click [`server/start_service.bat`](file:///C:/Users/moham/Desktop/vision/server/start_service.bat)
-5. **Uninstall Service**: Double-click [`server/uninstall_service.bat`](file:///C:/Users/moham/Desktop/vision/server/uninstall_service.bat)
-
-### 4. Launch the Phone Application
+### 3. Launch the Phone Application
 
 Install the release APK located at:
 `mobile/build/app/outputs/flutter-apk/app-release.apk`
 
 1. Open the app and tap **"START BACKGROUND BROADCAST"**.
 2. The phone automatically discovers your PC on port `45454` and connects to `ws://<PC-IP>:8765/ws/phone`.
-3. You can also specify the PC IP manually (e.g., `192.168.1.150` or `10.0.2.2` for emulator).
-4. Lock the screen or minimize the app; the stream runs continuously in the background.
+3. Lock the screen or minimize the app; video and audio stream continuously in the background.

@@ -23,6 +23,8 @@ mobile/android/local.properties
 mobile/android/captures/
 mobile/android/gradleBuild/
 
-# OS Files
+# OS & Runtime Files
 .DS_Store
 Thumbs.db
+*.log
+*.pid

@@ -31,6 +31,11 @@ class StreamService extends ChangeNotifier {
   String _rearStatusMessage = 'Standby';
   String _frontStatusMessage = 'Standby';
 
+  bool _isFlashOn = false;
+  int _jpegQuality = 75;
+  int _targetFps = 30;
+  bool _isAudioEnabled = true;
+
   StreamSubscription? _eventSubscription;
 
   BroadcastStatus get status => _status;
@@ -50,6 +55,11 @@ class StreamService extends ChangeNotifier {
   bool get isFrontActive => _isFrontActive;
   String get rearStatusMessage => _rearStatusMessage;
   String get frontStatusMessage => _frontStatusMessage;
+
+  bool get isFlashOn => _isFlashOn;
+  int get jpegQuality => _jpegQuality;
+  int get targetFps => _targetFps;
+  bool get isAudioEnabled => _isAudioEnabled;
 
   StreamService() {
     _initEventChannel();
@@ -104,6 +114,18 @@ class StreamService extends ChangeNotifier {
       case 'TELEMETRY':
         _rearFps = (data['rearFps'] as num?)?.toDouble() ?? _rearFps;
         _frontFps = (data['frontFps'] as num?)?.toDouble() ?? _frontFps;
+        break;
+      case 'FLASH_STATUS':
+        _isFlashOn = data['flashEnabled'] as bool? ?? _isFlashOn;
+        break;
+      case 'QUALITY_STATUS':
+        _jpegQuality = (data['quality'] as num?)?.toInt() ?? _jpegQuality;
+        break;
+      case 'FPS_STATUS':
+        _targetFps = (data['fps'] as num?)?.toInt() ?? _targetFps;
+        break;
+      case 'AUDIO_STATUS':
+        _isAudioEnabled = data['audioEnabled'] as bool? ?? _isAudioEnabled;
         break;
       case 'DISCONNECTED':
         _status = BroadcastStatus.disconnected;

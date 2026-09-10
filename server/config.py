@@ -8,10 +8,18 @@ HTTP_PORT = 8765
 DISCOVERY_PORT = 45454
 BROADCAST_IP = "255.255.255.255"
 
-# Video streaming settings
-JPEG_QUALITY = 75
+# Video streaming & remote hardware controls
+DEFAULT_FLASH_ENABLED = False
+DEFAULT_JPEG_QUALITY = 75
 DEFAULT_FPS_TARGET = 30
 MAX_BUFFER_FRAMES = 5
+
+# Audio streaming settings (Microphone 16kHz 16-bit Mono PCM)
+DEFAULT_AUDIO_ENABLED = True
+AUDIO_SAMPLE_RATE = 16000
+AUDIO_CHANNELS = 1
+AUDIO_BIT_DEPTH = 16
+AUDIO_CHUNK_SIZE = 2048
 
 def get_local_ip() -> str:
     """Detects the active local LAN/Wi-Fi IP address of the host machine."""

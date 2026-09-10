@@ -38,6 +38,11 @@ class BackgroundStreamService : Service() {
         const val EXTRA_AUTO_DISCOVER = "extra_auto_discover"
         const val EXTRA_CAMERA_MODE = "extra_camera_mode"
 
+        // Wire protocol prefix byte codes
+        const val CODE_REAR_FRAME: Byte = 0x00
+        const val CODE_FRONT_FRAME: Byte = 0x01
+        const val CODE_AUDIO_CHUNK: Byte = 0x02
+
         var isServiceRunning = false
             private set
 
@@ -55,6 +60,7 @@ class BackgroundStreamService : Service() {
     }
 
     private lateinit var cameraManager: DualCameraManager
+    private lateinit var audioManager: AudioStreamManager
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -84,6 +90,7 @@ class BackgroundStreamService : Service() {
     override fun onCreate() {
         super.onCreate()
         cameraManager = DualCameraManager(this)
+        audioManager = AudioStreamManager(this)
         createNotificationChannel()
         acquireLocks()
         initHttpClient()
@@ -182,6 +189,9 @@ class BackgroundStreamService : Service() {
             var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
             startForeground(NOTIFICATION_ID, notification, serviceType)
         } else {
@@ -317,6 +327,59 @@ class BackgroundStreamService : Service() {
                         }
                     }
                 )
+
+                // Start microphone streaming with zero-overhead PCM (16kHz Mono)
+                audioManager.startStreaming(object : AudioStreamManager.AudioChunkListener {
+                    override fun onAudioDataAvailable(pcmBytes: ByteArray) {
+                        if (!isStreaming.get() || !audioManager.isAudioEnabled()) return
+                        val packet = ByteArray(1 + pcmBytes.size)
+                        packet[0] = CODE_AUDIO_CHUNK
+                        System.arraycopy(pcmBytes, 0, packet, 1, pcmBytes.size)
+                        webSocket.send(packet.toByteString(0, packet.size))
+                    }
+                })
+
+                // Announce device capabilities, flash status, quality, fps, and audio state to server
+                sendDeviceInfoToServer()
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                try {
+                    val json = JSONObject(text)
+                    if (json.optString("type") == "CONTROL") {
+                        when (json.optString("action")) {
+                            "set_flash" -> {
+                                val enable = json.optBoolean("enabled", false)
+                                val success = cameraManager.setTorch(enable)
+                                sendDeviceStateToServer()
+                                notifyEvent("FLASH_STATUS", mapOf("flashEnabled" to cameraManager.isFlashOn, "success" to success))
+                            }
+                            "set_quality" -> {
+                                val quality = json.optInt("quality", 75)
+                                val success = cameraManager.setJpegQuality(quality)
+                                sendDeviceStateToServer()
+                                notifyEvent("QUALITY_STATUS", mapOf("quality" to cameraManager.currentJpegQuality, "success" to success))
+                            }
+                            "set_fps" -> {
+                                val fps = json.optInt("fps", 30)
+                                cameraManager.setTargetFps(fps)
+                                sendDeviceStateToServer()
+                                notifyEvent("FPS_STATUS", mapOf("fps" to cameraManager.targetFps))
+                            }
+                            "set_audio" -> {
+                                val enable = json.optBoolean("enabled", true)
+                                audioManager.setEnabled(enable)
+                                sendDeviceStateToServer()
+                                notifyEvent("AUDIO_STATUS", mapOf("audioEnabled" to audioManager.isAudioEnabled()))
+                            }
+                            "sync_state" -> {
+                                sendDeviceInfoToServer()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error handling server control message: ${e.message}")
+                }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -324,6 +387,7 @@ class BackgroundStreamService : Service() {
                 Log.e(TAG, "WebSocket connection failed to $ip:$port: $errorMsg", t)
                 isStreaming.set(false)
                 cameraManager.stopStreaming()
+                audioManager.stopStreaming()
 
                 notifyEvent("DISCONNECTED", mapOf(
                     "error" to errorMsg,
@@ -347,9 +411,45 @@ class BackgroundStreamService : Service() {
                 Log.d(TAG, "WebSocket closed ($code): $reason")
                 isStreaming.set(false)
                 cameraManager.stopStreaming()
+                audioManager.stopStreaming()
                 notifyEvent("DISCONNECTED", mapOf("reason" to reason))
             }
         })
+    }
+
+    private fun sendDeviceInfoToServer() {
+        try {
+            val bm = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            val batteryLevel = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+            val json = JSONObject().apply {
+                put("type", "DEVICE_INFO")
+                put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
+                put("battery", if (batteryLevel >= 0) "$batteryLevel%" else "N/A")
+                put("flash_supported", cameraManager.isFlashAvailable)
+                put("flash_enabled", cameraManager.isFlashOn)
+                put("quality", cameraManager.currentJpegQuality)
+                put("fps", cameraManager.targetFps)
+                put("audio_enabled", audioManager.isAudioEnabled())
+            }
+            webSocket?.send(json.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send device info to server: ${e.message}")
+        }
+    }
+
+    private fun sendDeviceStateToServer() {
+        try {
+            val json = JSONObject().apply {
+                put("type", "STATE_UPDATE")
+                put("flash_enabled", cameraManager.isFlashOn)
+                put("quality", cameraManager.currentJpegQuality)
+                put("fps", cameraManager.targetFps)
+                put("audio_enabled", audioManager.isAudioEnabled())
+            }
+            webSocket?.send(json.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send device state to server: ${e.message}")
+        }
     }
 
     private fun sendCameraStatusToServer() {
@@ -398,6 +498,7 @@ class BackgroundStreamService : Service() {
         discoveryThread = null
 
         cameraManager.stopStreaming()
+        audioManager.stopStreaming()
         try {
             webSocket?.close(1000, "User stopped stream")
         } catch (e: Exception) {

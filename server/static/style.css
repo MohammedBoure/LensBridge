@@ -225,6 +225,81 @@ canvas {
   to { transform: rotate(360deg); }
 }
 
+.controls-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: rgba(17, 24, 39, 0.95);
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.controls-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.controls-group select {
+  background: #1f2937;
+  color: var(--accent-cyan);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  outline: none;
+}
+
+.controls-group input[type="range"] {
+  width: 100px;
+  accent-color: var(--accent-cyan);
+}
+
+.btn-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #374151;
+  color: #fff;
+  border: 1px solid var(--border-color);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-control:hover {
+  filter: brightness(1.15);
+}
+
+.btn-control.flash-on {
+  background: #d97706;
+  color: #fff;
+}
+
+.btn-audio-active {
+  background: #065f46;
+  color: #a7f3d0;
+}
+
+.btn-audio-muted {
+  background: #7f1d1d;
+  color: #fca5a5;
+}
+
+.stat-badge.audio-stat {
+  color: var(--accent-cyan);
+}
+
 .camera-footer {
   display: flex;
   justify-content: flex-end;
